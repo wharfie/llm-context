@@ -1,0 +1,7 @@
+{
+  "name": "tool-with-bin",
+  "version": "1.0.0",
+  "bin": {
+    "hello-tool": "bin/hello-tool.js"
+  }
+}

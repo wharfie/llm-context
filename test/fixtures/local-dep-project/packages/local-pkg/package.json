@@ -1,0 +1,8 @@
+{
+  "name": "local-pkg",
+  "version": "1.0.0",
+  "bin": {
+    "local-hello": "./bin/local-hello.js"
+  },
+  "main": "index.js"
+}

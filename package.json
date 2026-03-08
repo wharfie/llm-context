@@ -1,0 +1,32 @@
+{
+  "name": "llm-context-cli",
+  "version": "1.2.4",
+  "description": "Build a unified LLM_CONTEXT.tar.gz for npm and python-uv projects with exact source and target dependency bundles.",
+  "type": "module",
+  "bin": {
+    "llm-context": "bin/llm-context.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "package.json"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "pack:local": "npm pack"
+  },
+  "keywords": [
+    "llm",
+    "context",
+    "cli",
+    "node",
+    "npm",
+    "python",
+    "uv"
+  ],
+  "license": "MIT"
+}

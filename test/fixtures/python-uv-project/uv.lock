@@ -1,0 +1,22 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "local-uv-pkg"
+version = "0.1.0"
+source = { path = "vendor/local_uv_pkg-0.1.0-py3-none-any.whl" }
+wheels = [
+    { filename = "local_uv_pkg-0.1.0-py3-none-any.whl", hash = "sha256:7828cc5ebec7abad474f4fefe4c5bf24c473b4beb988c261751907d271e61fa0" },
+]
+
+[[package]]
+name = "python-uv-project"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "local-uv-pkg" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "local-uv-pkg", path = "vendor/local_uv_pkg-0.1.0-py3-none-any.whl" }]

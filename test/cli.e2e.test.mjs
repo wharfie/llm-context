@@ -1,0 +1,322 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { after, before, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { main } from '../src/cli.mjs';
+import { copyProject, exists, rmrf, runCommand } from '../src/fs-utils.mjs';
+import { extractTarGz } from '../src/tar.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const fixturesRoot = path.join(__dirname, 'fixtures');
+let tempRoot;
+
+before(async () => {
+  tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-context-cli-test-'));
+});
+
+after(async () => {
+  if (tempRoot) await rmrf(tempRoot);
+});
+
+test('builds a unified archive with exact source snapshot and working target node_modules tar', async () => {
+  const projectRoot = path.join(tempRoot, 'project-a');
+  await copyProject(path.join(fixturesRoot, 'local-dep-project'), projectRoot);
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await main(['--project-root', projectRoot, '--output', outputFile]);
+
+  const { bundleRoot, assembleScript, verifyScript } = await extractBundle(outputFile, 'inspect-a');
+
+  assert.equal(await exists(path.join(bundleRoot, 'LLM_CONTEXT')), true);
+  assert.equal(await exists(path.join(bundleRoot, 'LLM_CONTEXT_source.tar.gz')), true);
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-x64', 'node_modules.tar.gz')), true);
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-x64', 'package-lock.json')), false);
+  assert.equal(await exists(assembleScript), true);
+  assert.equal(await exists(verifyScript), true);
+  await assertExecutable(assembleScript);
+  await assertExecutable(verifyScript);
+
+  const manifest = await readJson(path.join(bundleRoot, 'MANIFEST.json'));
+  assert.equal(manifest.project.type, 'npm');
+  assert.equal(manifest.install.dependencyArchiveIncluded, true);
+  assert.equal(manifest.install.dependencyArchivePath, 'targets/linux-x64/node_modules.tar.gz');
+  assert.equal(manifest.artifacts.targetDependencies.kind, 'node_modules');
+
+  const sourceRestore = path.join(tempRoot, 'source-restore-a');
+  await extractTarGz({ archiveFile: path.join(bundleRoot, 'LLM_CONTEXT_source.tar.gz'), cwd: sourceRestore });
+  const originalPackageJson = await fs.readFile(path.join(projectRoot, 'package.json'));
+  const restoredPackageJson = await fs.readFile(path.join(sourceRestore, 'package.json'));
+  assert.deepEqual(restoredPackageJson, originalPackageJson);
+
+  await extractTarGz({ archiveFile: path.join(bundleRoot, 'targets', 'linux-x64', 'node_modules.tar.gz'), cwd: sourceRestore });
+  assert.equal(await exists(path.join(sourceRestore, 'node_modules', '.bin', 'local-hello')), true);
+  assert.equal(await exists(path.join(sourceRestore, 'node_modules', 'local-pkg', 'index.js')), true);
+});
+
+test('includes target package-lock.json when source lockfile is missing and applies it during assembly', async () => {
+  const projectRoot = path.join(tempRoot, 'project-b');
+  await copyProject(path.join(fixturesRoot, 'no-lock-project'), projectRoot);
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await main(['--project-root', projectRoot, '--output', outputFile]);
+
+  const { bundleRoot } = await extractBundle(outputFile, 'inspect-b');
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-x64', 'package-lock.json')), true);
+
+  runCommand(path.join(bundleRoot, 'assemble.offline.sh'), [], { cwd: bundleRoot });
+  assert.equal(await exists(path.join(bundleRoot, 'repo', 'package-lock.json')), true);
+});
+
+test('omits node_modules tar for projects without npm dependencies and still supports the exact offline workflow', async () => {
+  const projectRoot = path.join(tempRoot, 'project-c');
+  await copyProject(path.join(fixturesRoot, 'no-deps-project'), projectRoot);
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await main(['--project-root', projectRoot, '--output', outputFile]);
+
+  const { bundleRoot, assembleScript, verifyScript } = await extractBundle(outputFile, 'inspect-c');
+
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-x64', 'node_modules.tar.gz')), false);
+  assert.equal(await exists(assembleScript), true);
+  assert.equal(await exists(verifyScript), true);
+  await assertExecutable(assembleScript);
+  await assertExecutable(verifyScript);
+
+  const manifest = await readJson(path.join(bundleRoot, 'MANIFEST.json'));
+  assert.equal(manifest.formatVersion, 6);
+  assert.equal(manifest.project.type, 'npm');
+  assert.equal(manifest.install.required, false);
+  assert.equal(manifest.install.dependencyArchiveIncluded, false);
+  assert.equal(manifest.install.dependencyArchivePath, null);
+  assert.equal(manifest.install.nodeModulesIncluded, false);
+  assert.equal(manifest.artifacts.targetDependencies, null);
+  assert.equal(manifest.artifacts.targetNodeModules, null);
+  assert.equal(typeof manifest.artifacts.assembleScript.sha256, 'string');
+  assert.equal(typeof manifest.artifacts.verifyScript.sha256, 'string');
+
+  runCommand(assembleScript, [], { cwd: bundleRoot });
+  const assembledRepo = path.join(bundleRoot, 'repo');
+  assert.equal(await exists(path.join(assembledRepo, 'package.json')), true);
+  assert.equal(await exists(path.join(assembledRepo, 'node_modules')), false);
+
+  runCommand(verifyScript, ['repo'], { cwd: bundleRoot });
+  const verifyResults = await readJson(path.join(assembledRepo, '.llm_context_verify', 'results.json'));
+  assert.deepEqual(verifyResults, {
+    lint: 'passed',
+    test: 'passed'
+  });
+});
+
+test('builds a python-uv bundle with a relocatable venv archive and working offline verification', async () => {
+  const projectRoot = path.join(tempRoot, 'project-d');
+  await copyProject(path.join(fixturesRoot, 'python-uv-project'), projectRoot);
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await main(['--project-root', projectRoot, '--output', outputFile]);
+
+  const { bundleRoot, assembleScript, verifyScript } = await extractBundle(outputFile, 'inspect-d');
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-x64', 'venv.tar.gz')), true);
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-x64', 'uv.lock')), false);
+  await assertExecutable(assembleScript);
+  await assertExecutable(verifyScript);
+
+  const manifest = await readJson(path.join(bundleRoot, 'MANIFEST.json'));
+  assert.equal(manifest.project.type, 'python-uv');
+  assert.equal(manifest.install.required, true);
+  assert.equal(manifest.install.dependencyArchiveIncluded, true);
+  assert.equal(manifest.install.dependencyArchivePath, 'targets/linux-x64/venv.tar.gz');
+  assert.equal(manifest.install.lockfileIncluded, false);
+  assert.equal(manifest.install.nodeModulesIncluded, false);
+  assert.equal(manifest.artifacts.targetDependencies.kind, '.venv');
+  assert.equal(manifest.artifacts.targetNodeModules, null);
+
+  const sourceRestore = path.join(tempRoot, 'source-restore-d');
+  await extractTarGz({ archiveFile: path.join(bundleRoot, 'LLM_CONTEXT_source.tar.gz'), cwd: sourceRestore });
+  await extractTarGz({ archiveFile: path.join(bundleRoot, 'targets', 'linux-x64', 'venv.tar.gz'), cwd: sourceRestore });
+
+  const entryPointPath = path.join(sourceRestore, '.venv', 'bin', 'local-uv-hello');
+  const entryPointText = await fs.readFile(entryPointPath, 'utf8');
+  assert.equal(entryPointText.split('\n', 1)[0], '#!/usr/bin/env python3');
+
+  const helloResult = runCommand(entryPointPath, [], {
+    cwd: sourceRestore,
+    env: {
+      PATH: `${path.join(sourceRestore, '.venv', 'bin')}:${process.env.PATH}`
+    }
+  });
+  assert.match(helloResult.stdout, /hello from wheel/);
+
+  runCommand(assembleScript, [], { cwd: bundleRoot });
+  runCommand(verifyScript, ['repo'], { cwd: bundleRoot });
+  const verifyResults = await readJson(path.join(bundleRoot, 'repo', '.llm_context_verify', 'results.json'));
+  assert.deepEqual(verifyResults, {
+    lint: 'skipped',
+    test: 'passed'
+  });
+});
+
+test('captures target uv.lock when the source project does not include one', async () => {
+  const projectRoot = path.join(tempRoot, 'project-e');
+  await copyProject(path.join(fixturesRoot, 'python-uv-project'), projectRoot);
+  await fs.rm(path.join(projectRoot, 'uv.lock'));
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await main(['--project-root', projectRoot, '--output', outputFile]);
+
+  const { bundleRoot } = await extractBundle(outputFile, 'inspect-e');
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-x64', 'uv.lock')), true);
+
+  const manifest = await readJson(path.join(bundleRoot, 'MANIFEST.json'));
+  assert.equal(manifest.project.type, 'python-uv');
+  assert.equal(manifest.install.lockfileIncluded, true);
+  assert.equal(manifest.install.lockfilePath, 'targets/linux-x64/uv.lock');
+  assert.equal(manifest.artifacts.targetLock.path, 'targets/linux-x64/uv.lock');
+
+  runCommand(path.join(bundleRoot, 'assemble.offline.sh'), [], { cwd: bundleRoot });
+  assert.equal(await exists(path.join(bundleRoot, 'repo', 'uv.lock')), true);
+});
+
+test('auto-selects and pulls a python-uv Docker image from uv.lock for cross-target builds', async () => {
+  const projectRoot = path.join(tempRoot, 'project-f');
+  await copyProject(path.join(fixturesRoot, 'python-uv-project'), projectRoot);
+
+  const fakeDockerDir = path.join(tempRoot, 'fake-docker-f');
+  const fakeDockerLog = path.join(fakeDockerDir, 'docker.log');
+  await createFakeDocker(fakeDockerDir);
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await withEnvironment({
+    PATH: `${fakeDockerDir}:${process.env.PATH || ''}`,
+    FAKE_DOCKER_LOG: fakeDockerLog,
+    FAKE_DOCKER_ALLOWED_PULLS: 'ghcr.io/astral-sh/uv:python3.13-bookworm'
+  }, async () => {
+    await main(['--project-root', projectRoot, '--output', outputFile, '--target', 'linux-arm64']);
+  });
+
+  const dockerLogLines = (await fs.readFile(fakeDockerLog, 'utf8'))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  assert.deepEqual(
+    dockerLogLines.filter((line) => line.startsWith('pull ')),
+    [
+      'pull ghcr.io/astral-sh/uv:python3.13-bookworm-slim',
+      'pull ghcr.io/astral-sh/uv:python3.13-bookworm'
+    ]
+  );
+  assert.ok(dockerLogLines.includes('run ghcr.io/astral-sh/uv:python3.13-bookworm uv-sync'));
+  assert.ok(dockerLogLines.includes('run ghcr.io/astral-sh/uv:python3.13-bookworm tar-create'));
+
+  const { bundleRoot } = await extractBundle(outputFile, 'inspect-f');
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-arm64', 'venv.tar.gz')), true);
+});
+
+async function withEnvironment(overrides, fn) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value == null) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+async function createFakeDocker(binDir) {
+  await fs.mkdir(binDir, { recursive: true });
+  const scriptPath = path.join(binDir, 'docker');
+  const script = [
+    '#!/usr/bin/env node',
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const { execFileSync } = require('node:child_process');",
+    "const args = process.argv.slice(2);",
+    "const logFile = process.env.FAKE_DOCKER_LOG;",
+    "function log(line) { if (logFile) fs.appendFileSync(logFile, `${line}\\n`); }",
+    "function pullAllowList() { return new Set(String(process.env.FAKE_DOCKER_ALLOWED_PULLS || '').split(',').filter(Boolean)); }",
+    "function localImages() { return new Set(String(process.env.FAKE_DOCKER_LOCAL_IMAGES || '').split(',').filter(Boolean)); }",
+    "function workspaceRoot(argv) { const index = argv.indexOf('-v'); if (index === -1) return null; return String(argv[index + 1] || '').split(':')[0]; }",
+    "function dockerImage(argv) { const bashIndex = argv.indexOf('bash'); return bashIndex > 0 ? argv[bashIndex - 1] : null; }",
+    "function pythonMinorVersion(image) { const match = String(image || '').match(/python(\\d+\\.\\d+)/); return match ? match[1] : '3.12'; }",
+    "function createFakeVenv(root, image) {",
+    "  const pythonMinor = pythonMinorVersion(image);",
+    "  const venvDir = path.join(root, '.venv');",
+    "  const binDir = path.join(venvDir, 'bin');",
+    "  const sitePackagesDir = path.join(venvDir, 'lib', `python${pythonMinor}`, 'site-packages');",
+    "  const packageDir = path.join(sitePackagesDir, 'local_uv_pkg');",
+    "  const distInfoDir = path.join(sitePackagesDir, 'local_uv_pkg-0.1.0.dist-info');",
+    "  fs.mkdirSync(binDir, { recursive: true });",
+    "  fs.mkdirSync(packageDir, { recursive: true });",
+    "  fs.mkdirSync(distInfoDir, { recursive: true });",
+    "  fs.writeFileSync(path.join(venvDir, 'pyvenv.cfg'), `version = ${pythonMinor}\\n`);",
+    "  const pythonShim = ['#!/usr/bin/env bash', `echo fake python ${pythonMinor}`].join('\\n') + '\\n';",
+    "  fs.writeFileSync(path.join(binDir, 'python'), pythonShim);",
+    "  fs.chmodSync(path.join(binDir, 'python'), 0o755);",
+    "  fs.copyFileSync(path.join(binDir, 'python'), path.join(binDir, 'python3'));",
+    "  fs.chmodSync(path.join(binDir, 'python3'), 0o755);",
+    "  fs.writeFileSync(path.join(binDir, 'local-uv-hello'), `#!${path.join(root, '.venv', 'bin', 'python3')}\\nprint(\\\"hello from fake docker\\\")\\n`);",
+    "  fs.chmodSync(path.join(binDir, 'local-uv-hello'), 0o755);",
+    "  fs.writeFileSync(path.join(packageDir, '__init__.py'), '__all__ = []\\n');",
+    "  fs.writeFileSync(path.join(distInfoDir, 'METADATA'), 'Metadata-Version: 2.1\\nName: local-uv-pkg\\nVersion: 0.1.0\\n');",
+    "}",
+    "if (args[0] === '--version') { console.log('Docker version 0.0.0-fake'); process.exit(0); }",
+    "if (args[0] === 'image' && args[1] === 'inspect') { const image = args[2]; log(`inspect ${image}`); process.exit(localImages().has(image) ? 0 : 1); }",
+    "if (args[0] === 'pull') { const image = args[1]; log(`pull ${image}`); const allowed = pullAllowList(); if (allowed.size === 0 || allowed.has(image)) { console.log(`Pulled ${image}`); process.exit(0); } console.error(`manifest unknown: ${image}`); process.exit(1); }",
+    "if (args[0] === 'run') {",
+    "  const image = dockerImage(args);",
+    "  const workspace = workspaceRoot(args);",
+    "  const bashIndex = args.indexOf('bash');",
+    "  const command = bashIndex === -1 ? '' : String(args[bashIndex + 2] || '');",
+    "  if (!workspace || !image) { console.error('missing workspace or image'); process.exit(1); }",
+    "  if (command.includes('uv sync')) { createFakeVenv(workspace, image); log(`run ${image} uv-sync`); process.exit(0); }",
+    "  if (command.includes('tar -czf')) {",
+    "    const match = command.match(/tar -czf ['\\\"]?([^'\\\" ]+)['\\\"]? -C \\/work ['\\\"]?([^'\\\" ]+)['\\\"]?/);",
+    "    if (!match) { console.error(`unsupported tar command: ${command}`); process.exit(1); }",
+    "    execFileSync('tar', ['-czf', path.join(workspace, match[1]), '-C', workspace, match[2]], { stdio: 'ignore' });",
+    "    log(`run ${image} tar-create`);",
+    "    process.exit(0);",
+    "  }",
+    "  console.error(`unsupported docker run command: ${command}`);",
+    "  process.exit(1);",
+    "}",
+    "console.error(`unsupported docker invocation: ${args.join(' ')}`);",
+    "process.exit(1);",
+    ''
+  ].join('\n');
+
+  await fs.writeFile(scriptPath, script, 'utf8');
+  await fs.chmod(scriptPath, 0o755);
+}
+
+async function extractBundle(archiveFile, inspectName) {
+  const inspectRoot = path.join(tempRoot, inspectName);
+  await extractTarGz({ archiveFile, cwd: inspectRoot });
+  const bundleRoot = path.join(inspectRoot, 'LLM_CONTEXT');
+  return {
+    inspectRoot,
+    bundleRoot,
+    assembleScript: path.join(bundleRoot, 'assemble.offline.sh'),
+    verifyScript: path.join(bundleRoot, 'verify.offline.sh')
+  };
+}
+
+async function readJson(filePath) {
+  return JSON.parse(await fs.readFile(filePath, 'utf8'));
+}
+
+async function assertExecutable(filePath) {
+  const stat = await fs.stat(filePath);
+  assert.notEqual(stat.mode & 0o111, 0, `${filePath} should be executable`);
+}

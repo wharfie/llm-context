@@ -1,0 +1,14 @@
+{
+  "name": "basic-local-fixture",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "mini-utils": "file:packages/mini-utils"
+  },
+  "devDependencies": {
+    "tool-with-bin": "file:packages/tool-with-bin"
+  }
+}

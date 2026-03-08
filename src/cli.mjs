@@ -1,0 +1,290 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { buildContextFile } from './context.mjs';
+import { prepareTargetArtifacts } from './deps.mjs';
+import { ensureDir, exists, hashFile, stripExtendedAttributes, writeJson, rmrf } from './fs-utils.mjs';
+import { detectProjectType } from './project-type.mjs';
+import { buildBundleReadme } from './readme.mjs';
+import { buildBundleScripts } from './scripts.mjs';
+import { createSourceSnapshot } from './source-snapshot.mjs';
+import { createTarGzFromDir, extractTarGz } from './tar.mjs';
+
+export async function main(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv);
+  if (options.help) {
+    printHelp();
+    return;
+  }
+
+  const projectRoot = path.resolve(options.projectRoot || process.cwd());
+  const projectType = await detectProjectType(projectRoot, options.projectType || 'auto');
+  const outputFile = path.resolve(projectRoot, options.output || 'LLM_CONTEXT.tar.gz');
+  const targetPlatform = options.platform || 'linux';
+  const targetArch = options.arch || 'x64';
+  const targetKey = `${targetPlatform}-${targetArch}`;
+
+  console.error(`Project root: ${projectRoot}`);
+  console.error(`Project type: ${projectType.humanName}`);
+  console.error(`Target: ${targetPlatform}/${targetArch}`);
+
+  const tempBundleRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-context-bundle-'));
+  const bundleDir = path.join(tempBundleRoot, 'LLM_CONTEXT');
+  await ensureDir(bundleDir);
+
+  try {
+    const contextPath = path.join(bundleDir, 'LLM_CONTEXT');
+    await buildContextFile({ projectRoot, outputFile: contextPath });
+    console.error(`Wrote ${contextPath}`);
+
+    const sourceSnapshotPath = path.join(bundleDir, 'LLM_CONTEXT_source.tar.gz');
+    await createSourceSnapshot({ projectRoot, outputFile: sourceSnapshotPath });
+    console.error(`Wrote ${sourceSnapshotPath}`);
+
+    const depsMeta = await prepareTargetArtifacts({
+      projectRoot,
+      bundleRoot: bundleDir,
+      targetPlatform,
+      targetArch,
+      dockerImage: options.dockerImage,
+      keepTemp: Boolean(options.keepTemp),
+      projectType: projectType.id
+    });
+    if (depsMeta.dependencyArchiveIncluded) {
+      console.error(`Wrote ${depsMeta.dependencyArchivePath}`);
+    } else {
+      console.error(`Skipped targets/${targetKey}/${projectType.dependencyArchiveFileName} because the target install did not need ${projectType.dependencyDirectory}/.`);
+    }
+    if (depsMeta.targetLockIncluded) {
+      console.error(`Wrote ${depsMeta.targetLockPath}`);
+    }
+
+    const preassembledRepoIncluded = !options.noPreassembledRepo;
+    const preassembledRepoEmbedsDependencies = preassembledRepoIncluded
+      && depsMeta.dependencyArchiveIncluded
+      && Boolean(options.embedDependenciesInRepo || options.embedNodeModulesInRepo);
+
+    let preassembledRepoPath = null;
+    if (preassembledRepoIncluded) {
+      preassembledRepoPath = await buildPreassembledRepo({
+        bundleDir,
+        sourceSnapshotPath,
+        targetKey,
+        projectType,
+        targetDependencyArchiveIncluded: depsMeta.dependencyArchiveIncluded,
+        targetLockIncluded: depsMeta.targetLockIncluded,
+        embedDependencies: preassembledRepoEmbedsDependencies
+      });
+      if (preassembledRepoEmbedsDependencies) {
+        console.error(`Wrote ${preassembledRepoPath} with embedded ${projectType.dependencyDirectory}.`);
+      } else if (depsMeta.dependencyArchiveIncluded) {
+        console.error(`Wrote ${preassembledRepoPath} without ${projectType.dependencyDirectory} to avoid duplicating bundled target dependencies.`);
+      } else {
+        console.error(`Wrote ${preassembledRepoPath}`);
+      }
+    } else {
+      console.error('Skipped repo.tar.gz because --no-preassembled-repo was requested.');
+    }
+
+    const readmePath = await buildBundleReadme({
+      bundleDir,
+      targetKey,
+      projectType,
+      dependencyArchiveIncluded: depsMeta.dependencyArchiveIncluded,
+      targetLockIncluded: depsMeta.targetLockIncluded,
+      preassembledRepoIncluded,
+      preassembledRepoEmbedsDependencies
+    });
+    const scriptPaths = await buildBundleScripts({
+      bundleDir,
+      targetKey,
+      projectType,
+      preassembledRepoIncluded,
+      preassembledRepoEmbedsDependencies
+    });
+
+    stripExtendedAttributes(bundleDir);
+
+    const dependencyArchiveRelativePath = depsMeta.dependencyArchiveIncluded
+      ? `targets/${targetKey}/${projectType.dependencyArchiveFileName}`
+      : null;
+    const lockfileRelativePath = depsMeta.targetLockIncluded
+      ? `targets/${targetKey}/${projectType.lockfileName}`
+      : null;
+
+    const manifest = {
+      formatVersion: 6,
+      project: {
+        type: projectType.id,
+        manifestFile: projectType.manifestFile,
+        dependencyDirectory: projectType.dependencyDirectory,
+        dependencyArchiveFileName: projectType.dependencyArchiveFileName,
+        lockfileName: projectType.lockfileName
+      },
+      target: { platform: targetPlatform, arch: targetArch, key: targetKey },
+      install: {
+        required: depsMeta.installRequired,
+        dependencyArchiveIncluded: depsMeta.dependencyArchiveIncluded,
+        dependencyArchivePath: dependencyArchiveRelativePath,
+        lockfileIncluded: depsMeta.targetLockIncluded,
+        lockfilePath: lockfileRelativePath,
+        nodeModulesIncluded: projectType.id === 'npm' ? depsMeta.dependencyArchiveIncluded : false
+      },
+      bundleOptions: {
+        preassembledRepoIncluded,
+        preassembledRepoEmbedsDependencies,
+        preassembledRepoEmbedsNodeModules: projectType.id === 'npm' ? preassembledRepoEmbedsDependencies : false
+      },
+      artifacts: {
+        context: { path: 'LLM_CONTEXT', sha256: await hashFile(contextPath) },
+        sourceSnapshot: { path: 'LLM_CONTEXT_source.tar.gz', sha256: await hashFile(sourceSnapshotPath) },
+        preassembledRepo: preassembledRepoPath
+          ? {
+              path: 'repo.tar.gz',
+              sha256: await hashFile(preassembledRepoPath),
+              embedsDependencies: preassembledRepoEmbedsDependencies,
+              embedsNodeModules: projectType.id === 'npm' ? preassembledRepoEmbedsDependencies : false
+            }
+          : null,
+        targetDependencies: depsMeta.dependencyArchiveIncluded
+          ? {
+              path: dependencyArchiveRelativePath,
+              sha256: await hashFile(path.join(bundleDir, dependencyArchiveRelativePath)),
+              kind: projectType.dependencyDirectory
+            }
+          : null,
+        targetNodeModules: projectType.id === 'npm' && depsMeta.dependencyArchiveIncluded
+          ? {
+              path: `targets/${targetKey}/node_modules.tar.gz`,
+              sha256: await hashFile(path.join(bundleDir, 'targets', targetKey, 'node_modules.tar.gz'))
+            }
+          : null,
+        targetLock: depsMeta.targetLockIncluded
+          ? {
+              path: lockfileRelativePath,
+              sha256: await hashFile(path.join(bundleDir, lockfileRelativePath))
+            }
+          : null,
+        readme: { path: 'README.md', sha256: await hashFile(readmePath) },
+        assembleScript: { path: 'assemble.offline.sh', sha256: await hashFile(scriptPaths.assembleScriptPath) },
+        verifyScript: { path: 'verify.offline.sh', sha256: await hashFile(scriptPaths.verifyScriptPath) }
+      }
+    };
+    await writeJson(path.join(bundleDir, 'MANIFEST.json'), manifest);
+
+    await createTarGzFromDir({ cwd: tempBundleRoot, outputFile, relativePath: 'LLM_CONTEXT' });
+    console.error(`Wrote ${outputFile}`);
+  } finally {
+    if (!options.keepTemp) {
+      await fs.rm(tempBundleRoot, { recursive: true, force: true });
+    } else {
+      console.error(`Kept temp bundle dir: ${tempBundleRoot}`);
+    }
+  }
+}
+
+async function buildPreassembledRepo({
+  bundleDir,
+  sourceSnapshotPath,
+  targetKey,
+  projectType,
+  targetDependencyArchiveIncluded,
+  targetLockIncluded,
+  embedDependencies
+}) {
+  const stagingRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-context-preassembled-'));
+  const repoDir = path.join(stagingRoot, 'repo');
+  const outputFile = path.join(bundleDir, 'repo.tar.gz');
+  const targetDir = path.join(bundleDir, 'targets', targetKey);
+  const targetLockPath = path.join(targetDir, projectType.lockfileName);
+  const sourceLockPath = path.join(repoDir, projectType.lockfileName);
+  const targetDependencyArchivePath = path.join(targetDir, projectType.dependencyArchiveFileName);
+
+  try {
+    await ensureDir(repoDir);
+    await extractTarGz({ archiveFile: sourceSnapshotPath, cwd: repoDir });
+
+    if (targetLockIncluded && (await exists(targetLockPath))) {
+      if (!(await exists(sourceLockPath))) {
+        await fs.copyFile(targetLockPath, sourceLockPath);
+      } else {
+        const targetLockDest = path.join(repoDir, '.llm_context_target', projectType.lockfileName);
+        await ensureDir(path.dirname(targetLockDest));
+        await fs.copyFile(targetLockPath, targetLockDest);
+      }
+    }
+
+    if (embedDependencies && targetDependencyArchiveIncluded && (await exists(targetDependencyArchivePath))) {
+      await extractTarGz({ archiveFile: targetDependencyArchivePath, cwd: repoDir });
+    }
+
+    stripExtendedAttributes(stagingRoot);
+    await createTarGzFromDir({ cwd: stagingRoot, outputFile, relativePath: 'repo' });
+    return outputFile;
+  } finally {
+    await rmrf(stagingRoot);
+  }
+}
+
+function parseArgs(argv) {
+  const options = {};
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--help' || arg === '-h') {
+      options.help = true;
+      continue;
+    }
+    if (arg === '--output' || arg === '-o') {
+      options.output = argv[++index];
+      continue;
+    }
+    if (arg === '--project-root') {
+      options.projectRoot = argv[++index];
+      continue;
+    }
+    if (arg === '--project-type') {
+      options.projectType = argv[++index];
+      continue;
+    }
+    if (arg === '--platform') {
+      options.platform = argv[++index];
+      continue;
+    }
+    if (arg === '--arch') {
+      options.arch = argv[++index];
+      continue;
+    }
+    if (arg === '--target') {
+      const [platform, arch] = String(argv[++index]).split('-', 2);
+      options.platform = platform;
+      options.arch = arch;
+      continue;
+    }
+    if (arg === '--docker-image') {
+      options.dockerImage = argv[++index];
+      continue;
+    }
+    if (arg === '--keep-temp') {
+      options.keepTemp = true;
+      continue;
+    }
+    if (arg === '--no-preassembled-repo') {
+      options.noPreassembledRepo = true;
+      continue;
+    }
+    if (arg === '--embed-dependencies-in-repo') {
+      options.embedDependenciesInRepo = true;
+      continue;
+    }
+    if (arg === '--embed-node-modules-in-repo') {
+      options.embedNodeModulesInRepo = true;
+      continue;
+    }
+    throw new Error(`Unknown argument: ${arg}`);
+  }
+  return options;
+}
+
+function printHelp() {
+  console.log(`llm-context\n\nUsage:\n  llm-context [options]\n\nOptions:\n  --output, -o <file>              Output tar.gz path (default: ./LLM_CONTEXT.tar.gz)\n  --project-root <dir>             Project root (default: cwd)\n  --project-type <type>            auto|npm|python-uv (default: auto)\n  --target <platform-arch>         Target tuple (default: linux-x64)\n  --platform <platform>            Target platform\n  --arch <arch>                    Target arch\n  --docker-image <image>           Docker image for cross-target installs (default: node:22-bookworm-slim for npm; python-uv auto-selects a uv image from requires-python)\n  --keep-temp                      Keep temporary bundle/workspace directories\n  --no-preassembled-repo           Omit repo.tar.gz entirely\n  --embed-dependencies-in-repo     Also embed node_modules/.venv inside repo.tar.gz\n  --embed-node-modules-in-repo     Backward-compatible alias for --embed-dependencies-in-repo\n  --help, -h                       Show help\n`);
+}

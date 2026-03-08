@@ -1,0 +1,17 @@
+{
+  "name": "fixture-lmdb-project",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node src/index.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "lmdb": "3.5.1",
+    "mini-utils": "file:packages/mini-utils"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
