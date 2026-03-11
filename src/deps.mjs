@@ -5,6 +5,7 @@ import { copyProject, ensureDir, exists, hashFile, maybeRun, normalizeRelative, 
 import { getProjectTypeDescriptor } from './project-type.mjs';
 import { DEFAULT_EXCLUDES } from './source-snapshot.mjs';
 import { createTarInDockerOrHost, extractTarGz } from './tar.mjs';
+import { buildNpmDependencyContextSection } from './context.mjs';
 
 const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
 const PYTHON_UV_AUTO_IMAGE_PREFIX = 'ghcr.io/astral-sh/uv';
@@ -76,6 +77,9 @@ async function buildSourceOnlyTargetArtifactResult({ projectRoot, targetPlatform
   const installRequired = descriptor.id === 'npm'
     ? await npmProjectNeedsInstall(projectRoot)
     : true;
+  const contextDependencySection = descriptor.id === 'npm'
+    ? await buildNpmDependencyContextSection({ projectRoot })
+    : '';
 
   return buildTargetArtifactResult({
     descriptor,
@@ -86,7 +90,8 @@ async function buildSourceOnlyTargetArtifactResult({ projectRoot, targetPlatform
     copiedTargetLock: false,
     targetLockPath: null,
     keepTemp: false,
-    tempRoot: null
+    tempRoot: null,
+    contextDependencySection
   });
 }
 
@@ -175,6 +180,13 @@ async function prepareNpmTargetArtifacts({ projectRoot, bundleRoot, targetPlatfo
       destinationPath: path.join(targetOutputDir, descriptor.lockfileName)
     });
 
+    const contextDependencySection = await buildNpmDependencyContextSection({
+      projectRoot,
+      installedNodeModulesDir: copiedArchive
+        ? path.join(workspaceRoot, descriptor.dependencyDirectory)
+        : path.join(projectRoot, descriptor.dependencyDirectory)
+    });
+
     return buildTargetArtifactResult({
       descriptor,
       targetKey,
@@ -184,7 +196,8 @@ async function prepareNpmTargetArtifacts({ projectRoot, bundleRoot, targetPlatfo
       copiedTargetLock,
       targetLockPath: path.join(targetOutputDir, descriptor.lockfileName),
       keepTemp,
-      tempRoot
+      tempRoot,
+      contextDependencySection
     });
   } finally {
     if (!keepTemp) {
@@ -289,7 +302,7 @@ async function preparePythonUvTargetArtifacts({ projectRoot, bundleRoot, targetP
   }
 }
 
-function buildTargetArtifactResult({ descriptor, targetKey, installRequired, copiedArchive, targetArchive, copiedTargetLock, targetLockPath, keepTemp, tempRoot }) {
+function buildTargetArtifactResult({ descriptor, targetKey, installRequired, copiedArchive, targetArchive, copiedTargetLock, targetLockPath, keepTemp, tempRoot, contextDependencySection = '' }) {
   return {
     projectType: descriptor.id,
     targetKey,
@@ -303,7 +316,8 @@ function buildTargetArtifactResult({ descriptor, targetKey, installRequired, cop
     lockfileName: descriptor.lockfileName,
     targetNodeModulesIncluded: descriptor.id === 'npm' ? copiedArchive : false,
     nodeModulesTarPath: descriptor.id === 'npm' && copiedArchive ? targetArchive : null,
-    tempRoot: keepTemp ? tempRoot : null
+    tempRoot: keepTemp ? tempRoot : null,
+    contextDependencySection
   };
 }
 

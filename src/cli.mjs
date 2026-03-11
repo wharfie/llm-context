@@ -19,7 +19,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   const projectRoot = path.resolve(options.projectRoot || process.cwd());
   const projectType = await detectProjectType(projectRoot, options.projectType || 'auto');
-  const outputFile = path.resolve(projectRoot, options.output || 'LLM_CONTEXT.tar.gz');
+  const outputFile = path.resolve(projectRoot, options.output || defaultOutputFileName(projectRoot));
   const targetPlatform = options.platform || 'linux';
   const targetArch = options.arch || 'x64';
   const targetKey = `${targetPlatform}-${targetArch}`;
@@ -34,8 +34,6 @@ export async function main(argv = process.argv.slice(2)) {
 
   try {
     const contextPath = path.join(bundleDir, 'LLM_CONTEXT');
-    await buildContextFile({ projectRoot, outputFile: contextPath });
-    console.error(`Wrote ${contextPath}`);
 
     const sourceSnapshotPath = path.join(bundleDir, 'LLM_CONTEXT_source.tar.gz');
     await createSourceSnapshot({ projectRoot, outputFile: sourceSnapshotPath });
@@ -61,6 +59,14 @@ export async function main(argv = process.argv.slice(2)) {
     if (!options.sourceOnly && depsMeta.targetLockIncluded) {
       console.error(`Wrote ${depsMeta.targetLockPath}`);
     }
+
+    await buildContextFile({
+      projectRoot,
+      outputFile: contextPath,
+      projectType: projectType.id,
+      dependencyContextSection: depsMeta.contextDependencySection
+    });
+    console.error(`Wrote ${contextPath}`);
 
     const preassembledRepoIncluded = !options.noPreassembledRepo;
     const preassembledRepoEmbedsDependencies = preassembledRepoIncluded
@@ -91,6 +97,7 @@ export async function main(argv = process.argv.slice(2)) {
 
     const readmePath = await buildBundleReadme({
       bundleDir,
+      archiveFileName: path.basename(outputFile),
       targetKey,
       projectType,
       dependencyArchiveIncluded: depsMeta.dependencyArchiveIncluded,
@@ -296,5 +303,10 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`llm-context\n\nUsage:\n  llm-context [options]\n\nOptions:\n  --output, -o <file>              Output tar.gz path (default: ./LLM_CONTEXT.tar.gz)\n  --project-root <dir>             Project root (default: cwd)\n  --project-type <type>            auto|npm|python-uv (default: auto)\n  --target <platform-arch>         Target tuple (default: linux-x64)\n  --platform <platform>            Target platform\n  --arch <arch>                    Target arch\n  --docker-image <image>           Docker image for cross-target installs (default: node:22-bookworm-slim for npm; python-uv auto-selects a uv image from requires-python)\n  --keep-temp                      Keep temporary bundle/workspace directories\n  --source-only                    Skip target dependency capture and bundle only source artifacts\n  --no-preassembled-repo           Omit repo.tar.gz entirely\n  --embed-dependencies-in-repo     Also embed node_modules/.venv inside repo.tar.gz\n  --embed-node-modules-in-repo     Backward-compatible alias for --embed-dependencies-in-repo\n  --help, -h                       Show help\n`);
+  console.log(`llm-context\n\nUsage:\n  llm-context [options]\n\nOptions:\n  --output, -o <file>              Output tar.gz path (default: ./LLM_CONTEXT-<folder-name>.tar.gz)\n  --project-root <dir>             Project root (default: cwd)\n  --project-type <type>            auto|npm|python-uv (default: auto)\n  --target <platform-arch>         Target tuple (default: linux-x64)\n  --platform <platform>            Target platform\n  --arch <arch>                    Target arch\n  --docker-image <image>           Docker image for cross-target installs (default: node:22-bookworm-slim for npm; python-uv auto-selects a uv image from requires-python)\n  --keep-temp                      Keep temporary bundle/workspace directories\n  --source-only                    Skip target dependency capture and bundle only source artifacts\n  --no-preassembled-repo           Omit repo.tar.gz entirely\n  --embed-dependencies-in-repo     Also embed node_modules/.venv inside repo.tar.gz\n  --embed-node-modules-in-repo     Backward-compatible alias for --embed-dependencies-in-repo\n  --help, -h                       Show help\n`);
+}
+
+function defaultOutputFileName(projectRoot) {
+  const folderName = path.basename(projectRoot) || 'project';
+  return `LLM_CONTEXT-${folderName}.tar.gz`;
 }

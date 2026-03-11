@@ -28,6 +28,7 @@ export async function copyProject(sourceRoot, destRoot, { exclude = [] } = {}) {
     filter: (src) => {
       const rel = normalizeRelative(path.relative(sourceRoot, src));
       if (!rel) return true;
+      if (isGeneratedLlmContextArtifactPath(rel)) return false;
       return !normalizedExcludes.some((pattern) => matchesExclude(rel, pattern));
     }
   });
@@ -59,6 +60,18 @@ export async function copySelectedPaths(sourceRoot, destRoot, relativePaths) {
 
 export function normalizeRelative(relPath) {
   return relPath.split(path.sep).join('/').replace(/^\.\//, '').replace(/\/$/, '');
+}
+
+export function isGeneratedLlmContextArtifactPath(relPath) {
+  const normalized = normalizeRelative(relPath);
+  if (!normalized) return false;
+
+  const topLevelEntry = normalized.split('/', 1)[0];
+  if (topLevelEntry === 'LLM_CONTEXT') return true;
+  if (topLevelEntry === 'LLM_CONTEXT_source.tar.gz') return true;
+  if (topLevelEntry === 'LLM_CONTEXT_package-lock.json') return true;
+  if (topLevelEntry === 'LLM_CONTEXT_node_modules.tar.gz') return true;
+  return /^LLM_CONTEXT(?:-[^/]+)?\.tar\.gz$/.test(topLevelEntry);
 }
 
 function matchesExclude(relPath, pattern) {

@@ -1,10 +1,10 @@
 # llm-context-cli
 
-Build a single `LLM_CONTEXT.tar.gz` from the root of an npm project or a Python project managed with uv.
+Build a single `LLM_CONTEXT-<folder-name>.tar.gz` from the root of an npm project or a Python project managed with uv.
 
 The unified archive contains:
 
-- `LLM_CONTEXT` — LLM-readable flattened text context
+- `LLM_CONTEXT` — curated flattened text context for an LLM prompt window
 - `LLM_CONTEXT_source.tar.gz` — exact source snapshot for byte-faithful reconstruction
 - `repo.tar.gz` — preassembled fast path containing a ready-to-run `repo/` tree
 - `targets/<platform>-<arch>/node_modules.tar.gz` for npm projects when the target install produces `node_modules/`
@@ -43,7 +43,7 @@ llm-context
 Useful options:
 
 ```bash
-llm-context --output ./dist/LLM_CONTEXT.tar.gz
+llm-context --output ./dist/LLM_CONTEXT-my-app.tar.gz
 llm-context --project-type npm
 llm-context --project-type python-uv
 llm-context --target linux-x64
@@ -57,6 +57,7 @@ llm-context --no-preassembled-repo
 
 ## Behavior
 
+- Defaults the output archive name to `LLM_CONTEXT-<current-folder-name>.tar.gz`
 - Defaults to target `linux/x64`
 - Auto-detects npm vs python-uv from the project root
 - Uses Docker when the host cannot natively build the requested target
@@ -75,6 +76,13 @@ llm-context --no-preassembled-repo
 - cross-target python-uv builds auto-select and pull `ghcr.io/astral-sh/uv:python<major.minor>-...` from `requires-python`; `--docker-image` still overrides the automatic choice
 - If Docker is installed but its daemon is unavailable, the CLI now raises an explicit error that points to `--source-only` as the no-dependencies fallback
 
+## Context vs runtime state
+
+The CLI now treats prompt context and runnable sandbox state as separate artifacts.
+
+- `LLM_CONTEXT` is optimized for an LLM context window. For npm projects it omits raw lockfiles and raw `node_modules/` content, then replaces that noise with a direct dependency summary plus selected README and TypeScript entrypoint snippets when they are available.
+- `LLM_CONTEXT_source.tar.gz`, `repo.tar.gz`, and `targets/<platform>-<arch>/...` preserve the exact source tree and target dependency state needed to run lint, tests, and other project tooling offline.
+
 ## Source-only bundles
 
 Use `--source-only` when you want the flattened context, exact source snapshot, and optional preassembled `repo/` tree without any bundled `node_modules/`, `.venv/`, or target lockfile capture.
@@ -90,7 +98,7 @@ That mode still writes `README.md`, `MANIFEST.json`, `assemble.offline.sh`, and 
 Fastest path from a generated npm bundle:
 
 ```bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf LLM_CONTEXT-<folder-name>.tar.gz
 cd LLM_CONTEXT
 tar -xzf repo.tar.gz
 cd repo
@@ -101,7 +109,7 @@ npm run test
 Fastest path from a generated python-uv bundle:
 
 ```bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf LLM_CONTEXT-<folder-name>.tar.gz
 cd LLM_CONTEXT
 tar -xzf repo.tar.gz
 tar -xzf targets/linux-x64/venv.tar.gz -C repo
@@ -112,7 +120,7 @@ cd repo
 Compatible path that preserves the older workflow for either project type:
 
 ```bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf LLM_CONTEXT-<folder-name>.tar.gz
 cd LLM_CONTEXT
 ./assemble.offline.sh
 ./verify.offline.sh repo

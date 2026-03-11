@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { copySelectedPaths, exists, listFilesRecursive, maybeRun, normalizeRelative, rmrf, stripExtendedAttributes } from './fs-utils.mjs';
+import { copySelectedPaths, exists, isGeneratedLlmContextArtifactPath, listFilesRecursive, maybeRun, normalizeRelative, rmrf, stripExtendedAttributes } from './fs-utils.mjs';
 import { createTarGzFromList } from './tar.mjs';
 
 export const DEFAULT_EXCLUDES = [
@@ -41,6 +41,7 @@ export async function discoverProjectFiles(projectRoot, { extraExcludes = [] } =
 }
 
 function isExcluded(relPath, excludes) {
+  if (isGeneratedLlmContextArtifactPath(relPath)) return true;
   for (const prefix of excludes) {
     if (!prefix) continue;
     if (relPath === prefix || relPath.startsWith(`${prefix}/`)) return true;

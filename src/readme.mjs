@@ -3,6 +3,7 @@ import path from 'node:path';
 
 export async function buildBundleReadme({
   bundleDir,
+  archiveFileName = 'LLM_CONTEXT.tar.gz',
   targetKey,
   projectType,
   dependencyArchiveIncluded,
@@ -13,6 +14,7 @@ export async function buildBundleReadme({
 }) {
   const readmeText = projectType.id === 'npm'
     ? buildNpmBundleReadme({
+        archiveFileName,
         targetKey,
         dependencyArchiveIncluded,
         targetLockIncluded,
@@ -21,6 +23,7 @@ export async function buildBundleReadme({
         sourceOnly
       })
     : buildPythonUvBundleReadme({
+        archiveFileName,
         targetKey,
         dependencyArchiveIncluded,
         targetLockIncluded,
@@ -34,7 +37,7 @@ export async function buildBundleReadme({
   return readmePath;
 }
 
-function buildNpmBundleReadme({ targetKey, dependencyArchiveIncluded, targetLockIncluded, preassembledRepoIncluded, preassembledRepoEmbedsDependencies, sourceOnly }) {
+function buildNpmBundleReadme({ archiveFileName, targetKey, dependencyArchiveIncluded, targetLockIncluded, preassembledRepoIncluded, preassembledRepoEmbedsDependencies, sourceOnly }) {
   const intro = sourceOnly
     ? `This archive contains a byte-faithful source snapshot and an LLM-readable flattened context file for \`${targetKey}\`. Target runtime dependencies were intentionally omitted because \`--source-only\` was requested.`
     : `This archive contains a byte-faithful source snapshot, an LLM-readable flattened context file, and optional target runtime dependencies for \`${targetKey}\`.`;
@@ -67,7 +70,7 @@ function buildNpmBundleReadme({ targetKey, dependencyArchiveIncluded, targetLock
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 tar -xzf repo.tar.gz
 cd repo
@@ -79,7 +82,7 @@ cd repo
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 tar -xzf repo.tar.gz
 tar -xzf targets/${targetKey}/node_modules.tar.gz -C repo
@@ -94,7 +97,7 @@ npm run test
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 tar -xzf repo.tar.gz
 cd repo
@@ -110,7 +113,7 @@ npm run test
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 ./assemble.offline.sh
 \`\`\`
@@ -121,7 +124,7 @@ This bundle is source-only. Restore dependencies separately before running \`ver
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 ./assemble.offline.sh
 ./verify.offline.sh repo
@@ -149,13 +152,13 @@ cd LLM_CONTEXT
   const failureRecoverySection = sourceOnly
     ? `## Failure recovery
 
-- If \`tar -xzf LLM_CONTEXT.tar.gz\` or \`./assemble.offline.sh\` is interrupted, timed out, or killed, treat the current \`repo/\` as invalid partial output.
+- If \`tar -xzf ${archiveFileName}\` or \`./assemble.offline.sh\` is interrupted, timed out, or killed, treat the current \`repo/\` as invalid partial output.
 - Delete \`repo/\` and rerun assembly from scratch before diagnosing missing \`node_modules/.bin\` launchers or broken dependencies.
 - Only treat missing \`node_modules/.bin\` entries as a real bundle issue after \`./assemble.offline.sh\` exits successfully from a clean bundle directory.
 - This bundle is source-only, so restore dependencies separately before validating npm tooling.`
     : `## Failure recovery
 
-- If \`tar -xzf LLM_CONTEXT.tar.gz\` or \`./assemble.offline.sh\` is interrupted, timed out, or killed, treat the current \`repo/\` as invalid partial output.
+- If \`tar -xzf ${archiveFileName}\` or \`./assemble.offline.sh\` is interrupted, timed out, or killed, treat the current \`repo/\` as invalid partial output.
 - Partial extraction can leave empty or missing files under \`node_modules/.bin\` that look like packaging defects even when the archive is correct.
 - Delete \`repo/\` and rerun assembly from scratch before diagnosing missing launchers or broken dependencies.
 - Only treat missing \`node_modules/.bin\` entries as a real bundle issue after \`./assemble.offline.sh\` exits successfully from a clean bundle directory.`;
@@ -174,6 +177,7 @@ cd LLM_CONTEXT
 - The target dependency tarball is created with platform \`tar\`, not a JS tar writer, so symlinks and launcher shims under \`node_modules/.bin\` survive extraction.
 - When the CLI writes a bundled \`node_modules.tar.gz\`, it extracts that archive into a temporary directory and verifies the full extracted \`node_modules/\` tree against the installed target tree before the bundle is finalized.
 - By default, \`repo.tar.gz\` does not duplicate a separate bundled \`node_modules/\` tree. That keeps dependency-heavy bundles much smaller while preserving a convenient repo restore archive.
+- For npm bundles, the flattened \`LLM_CONTEXT\` view intentionally omits raw lockfiles and raw \`node_modules/\` contents; it replaces them with a smaller direct dependency summary plus selected README and TypeScript entrypoint snippets when available.
 - \`verify.offline.sh\` only runs npm scripts that actually exist. For Jest-style test scripts, it retries with \`--runInBand\` after an initial failure, which helps in constrained sandboxes.
 - \`verify.offline.sh repo\` resolves the repo path before it starts writing logs, so relative paths work as written.
 - On macOS hosts, bundle creation strips more metadata before archiving, which reduces noisy \`LIBARCHIVE.xattr...\` warnings during extraction on Linux.`;
@@ -184,7 +188,7 @@ ${intro}
 
 ## Contents
 
-- LLM_CONTEXT — flattened text context for LLM consumption
+- LLM_CONTEXT — curated flattened text context for LLM consumption
 - LLM_CONTEXT_source.tar.gz — exact source snapshot to reconstruct the repo
 ${preassembledRepoLine}
 ${targetNodeModulesLine}
@@ -203,7 +207,7 @@ ${notes}
 `;
 }
 
-function buildPythonUvBundleReadme({ targetKey, dependencyArchiveIncluded, targetLockIncluded, preassembledRepoIncluded, preassembledRepoEmbedsDependencies, sourceOnly }) {
+function buildPythonUvBundleReadme({ archiveFileName, targetKey, dependencyArchiveIncluded, targetLockIncluded, preassembledRepoIncluded, preassembledRepoEmbedsDependencies, sourceOnly }) {
   const intro = sourceOnly
     ? `This archive contains a byte-faithful source snapshot and an LLM-readable flattened context file for \`${targetKey}\`. Target virtual environment artifacts were intentionally omitted because \`--source-only\` was requested.`
     : `This archive contains a byte-faithful source snapshot, an LLM-readable flattened context file, and a target Python virtual environment for \`${targetKey}\`.`;
@@ -236,7 +240,7 @@ function buildPythonUvBundleReadme({ targetKey, dependencyArchiveIncluded, targe
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 tar -xzf repo.tar.gz
 cd repo
@@ -248,7 +252,7 @@ cd repo
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 tar -xzf repo.tar.gz
 tar -xzf targets/${targetKey}/venv.tar.gz -C repo
@@ -262,7 +266,7 @@ cd repo
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 tar -xzf repo.tar.gz
 cd repo
@@ -277,7 +281,7 @@ cd repo
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 ./assemble.offline.sh
 \`\`\`
@@ -288,7 +292,7 @@ This bundle is source-only. Restore the virtual environment separately before ru
 Run these commands exactly from the bundle directory:
 
 \`\`\`bash
-tar -xzf LLM_CONTEXT.tar.gz
+tar -xzf ${archiveFileName}
 cd LLM_CONTEXT
 ./assemble.offline.sh
 ./verify.offline.sh repo
@@ -315,13 +319,13 @@ cd LLM_CONTEXT
   const failureRecoverySection = sourceOnly
     ? `## Failure recovery
 
-- If \`tar -xzf LLM_CONTEXT.tar.gz\` or \`./assemble.offline.sh\` is interrupted, timed out, or killed, treat the current \`repo/\` as invalid partial output.
+- If \`tar -xzf ${archiveFileName}\` or \`./assemble.offline.sh\` is interrupted, timed out, or killed, treat the current \`repo/\` as invalid partial output.
 - Delete \`repo/\` and rerun assembly from scratch before diagnosing missing \`.venv/\` files or broken console scripts.
 - Only treat missing \`.venv/\` entries as a real bundle issue after \`./assemble.offline.sh\` exits successfully from a clean bundle directory.
 - This bundle is source-only, so restore the virtual environment separately before validating Python tooling.`
     : `## Failure recovery
 
-- If \`tar -xzf LLM_CONTEXT.tar.gz\` or \`./assemble.offline.sh\` is interrupted, timed out, or killed, treat the current \`repo/\` as invalid partial output.
+- If \`tar -xzf ${archiveFileName}\` or \`./assemble.offline.sh\` is interrupted, timed out, or killed, treat the current \`repo/\` as invalid partial output.
 - Partial extraction can leave incomplete \`.venv/\` contents that look like packaging defects even when the archive is correct.
 - Delete \`repo/\` and rerun assembly from scratch before diagnosing missing virtual-environment files or broken console scripts.
 - Only treat missing \`.venv/\` entries as a real bundle issue after \`./assemble.offline.sh\` exits successfully from a clean bundle directory.`;
@@ -346,7 +350,7 @@ ${intro}
 
 ## Contents
 
-- LLM_CONTEXT — flattened text context for LLM consumption
+- LLM_CONTEXT — curated flattened text context for LLM consumption
 - LLM_CONTEXT_source.tar.gz — exact source snapshot to reconstruct the repo
 ${preassembledRepoLine}
 ${targetVenvLine}

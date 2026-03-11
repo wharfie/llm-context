@@ -106,6 +106,64 @@ test('builds a source-only npm bundle without invoking Docker for cross-target b
   assert.equal(await exists(path.join(bundleRoot, 'repo', 'node_modules')), false);
 });
 
+test('builds a curated npm context that omits raw lockfiles and summarizes direct dependency metadata', async () => {
+  const projectRoot = path.join(tempRoot, 'project-curated-context');
+  await copyProject(path.join(fixturesRoot, 'no-deps-project'), projectRoot);
+
+  const packageJsonPath = path.join(projectRoot, 'package.json');
+  const packageJson = await readJson(packageJsonPath);
+  packageJson.dependencies = {
+    'external-types-pkg': '^1.0.0'
+  };
+  await fs.writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
+
+  const dependencyDir = path.join(projectRoot, 'node_modules', 'external-types-pkg');
+  await fs.mkdir(dependencyDir, { recursive: true });
+  await fs.writeFile(path.join(dependencyDir, 'package.json'), `${JSON.stringify({
+    name: 'external-types-pkg',
+    version: '1.0.0',
+    types: 'index.d.ts',
+    main: 'index.js'
+  }, null, 2)}\n`);
+  await fs.writeFile(path.join(dependencyDir, 'index.d.ts'), 'export interface Greeting {\n  message: string;\n}\n\nexport declare function hello(name: string): Greeting;\n');
+  await fs.writeFile(path.join(dependencyDir, 'README.md'), '# external-types-pkg\n\nProvides typed greetings.\n');
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await main(['--project-root', projectRoot, '--output', outputFile, '--source-only']);
+
+  const { bundleRoot } = await extractBundle(outputFile, 'inspect-curated-context');
+  const contextText = await fs.readFile(path.join(bundleRoot, 'LLM_CONTEXT'), 'utf8');
+
+  assert.doesNotMatch(contextText, /FILE: package-lock\.json/);
+  assert.match(contextText, /CONTEXT STRATEGY/);
+  assert.match(contextText, /DEPENDENCY CONTEXT/);
+  assert.match(contextText, /\[dependencies\] external-types-pkg -> \^1\.0\.0/);
+  assert.match(contextText, /FILE: node_modules\/external-types-pkg\/index\.d\.ts/);
+  assert.match(contextText, /Provides typed greetings\./);
+});
+
+test('uses the repo folder name in the default bundle filename and excludes previous bundles from later snapshots', async () => {
+  const projectRoot = path.join(tempRoot, 'project-default-output-name');
+  await copyProject(path.join(fixturesRoot, 'no-deps-project'), projectRoot);
+
+  await main(['--project-root', projectRoot]);
+
+  const expectedArchive = path.join(projectRoot, 'LLM_CONTEXT-project-default-output-name.tar.gz');
+  assert.equal(await exists(expectedArchive), true);
+
+  await main(['--project-root', projectRoot]);
+
+  const { bundleRoot } = await extractBundle(expectedArchive, 'inspect-default-output-name');
+  const bundleReadme = await fs.readFile(path.join(bundleRoot, 'README.md'), 'utf8');
+  const contextText = await fs.readFile(path.join(bundleRoot, 'LLM_CONTEXT'), 'utf8');
+  assert.match(bundleReadme, /tar -xzf LLM_CONTEXT-project-default-output-name\.tar\.gz/);
+  assert.doesNotMatch(contextText, /LLM_CONTEXT-project-default-output-name\.tar\.gz/);
+
+  const sourceRestore = path.join(tempRoot, 'source-restore-default-output-name');
+  await extractTarGz({ archiveFile: path.join(bundleRoot, 'LLM_CONTEXT_source.tar.gz'), cwd: sourceRestore });
+  assert.equal(await exists(path.join(sourceRestore, 'LLM_CONTEXT-project-default-output-name.tar.gz')), false);
+});
+
 test('omits node_modules tar for projects without npm dependencies and still supports the exact offline workflow', async () => {
   const projectRoot = path.join(tempRoot, 'project-c');
   await copyProject(path.join(fixturesRoot, 'no-deps-project'), projectRoot);
