@@ -1,0 +1,56 @@
+I attached an offline repository bundle: `<ARCHIVE_NAME>` (for example `LLM_CONTEXT-my-repo.tar.gz`).
+
+This bundle has two purposes:
+1. provide curated context to help you find the right parts of the codebase quickly
+2. provide enough offline state to reconstruct the repo and run project validation locally
+
+Do not treat the bundle as a flat text dump.
+Do not treat the curated context as the source of truth for edits.
+For implementation, validation, and final outputs, the assembled repo at `repo/` is the source of truth.
+
+Reconstruct the repo locally first:
+
+tar -xzf <ARCHIVE_NAME>
+cd LLM_CONTEXT
+./assemble.offline.sh
+
+Important:
+- Treat any interrupted, timed-out, or tool-killed bundle extraction or `assemble.offline.sh` run as an invalid partial state.
+- If assembly is interrupted, delete the extracted bundle directory and rerun reconstruction from scratch before validating anything.
+- Do not diagnose broken `node_modules`, missing launchers, or dependency issues until assembly completes successfully with exit code `0`.
+
+Required workflow:
+1. Read `MANIFEST.json` and the bundle `README.md`.
+2. Reconstruct the repo and work from `repo/`.
+3. Read the repo `README.md` and the source files, tests, configs, scripts, and package metadata directly relevant to the task before editing.
+4. Use the curated bundle context only to orient yourself and locate relevant areas faster.
+5. If bundled context and files under `repo/` differ, trust `repo/`.
+6. Do not use network I/O unless I explicitly ask for it.
+7. Do not ask me to paste files that are already in the bundle.
+8. Do not stop at analysis; make the code changes.
+9. Do not ask for confirmation if the task is clear enough to execute.
+
+Implementation rules:
+- follow the existing project structure, conventions, scripts, and test patterns
+- make the smallest complete change that fully solves the task
+- keep unrelated files untouched
+- add or update tests when behavior changes
+- preserve existing lint, format, and typecheck standards
+- prefer fixing root causes over superficial patches
+- when uncertain, inspect more relevant files in `repo/` before changing code
+
+Validation:
+- run `./verify.offline.sh repo`
+- also run any additional targeted validation needed for the files you changed
+- if relevant, run the smallest direct test, lint, or typecheck command that exercises the change
+- only diagnose repo/runtime issues after a successful reconstruction and assembly
+- if a command fails because of sandbox, OS, missing toolchain, or other environment/tool limits rather than the code, explain exactly what failed, why it failed, and still provide the best complete patch you can
+
+Return:
+- a downloadable zip containing every changed file as a complete drop-in replacement, preserving repo-relative paths
+- a concise changelog
+- the exact commands you ran and their results
+- a brief note on any validation that could not be completed and why
+
+Task:
+<PUT TASK HERE>
