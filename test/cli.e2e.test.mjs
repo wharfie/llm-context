@@ -69,6 +69,43 @@ test('includes target package-lock.json when source lockfile is missing and appl
   assert.equal(await exists(path.join(bundleRoot, 'repo', 'package-lock.json')), true);
 });
 
+test('builds a source-only npm bundle without invoking Docker for cross-target builds', async () => {
+  const projectRoot = path.join(tempRoot, 'project-source-only');
+  await copyProject(path.join(fixturesRoot, 'local-dep-project'), projectRoot);
+
+  const fakeDockerDir = path.join(tempRoot, 'fake-docker-source-only');
+  await createDockerDaemonUnavailable(fakeDockerDir);
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await withEnvironment({
+    PATH: `${fakeDockerDir}:${process.env.PATH || ''}`
+  }, async () => {
+    await main(['--project-root', projectRoot, '--output', outputFile, '--target', 'linux-arm64', '--source-only']);
+  });
+
+  const { bundleRoot, assembleScript } = await extractBundle(outputFile, 'inspect-source-only');
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-arm64', 'node_modules.tar.gz')), false);
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-arm64', 'package-lock.json')), false);
+
+  const manifest = await readJson(path.join(bundleRoot, 'MANIFEST.json'));
+  assert.equal(manifest.project.type, 'npm');
+  assert.equal(manifest.install.required, true);
+  assert.equal(manifest.install.dependencyArchiveIncluded, false);
+  assert.equal(manifest.install.lockfileIncluded, false);
+  assert.equal(manifest.bundleOptions.sourceOnly, true);
+  assert.equal(manifest.artifacts.targetDependencies, null);
+  assert.equal(manifest.artifacts.targetLock, null);
+
+  const bundleReadme = await fs.readFile(path.join(bundleRoot, 'README.md'), 'utf8');
+  assert.match(bundleReadme, /--source-only/);
+  assert.doesNotMatch(bundleReadme, /\.\/verify\.offline\.sh repo/);
+
+  const assembleResult = runCommand(assembleScript, [], { cwd: bundleRoot });
+  assert.match(assembleResult.stdout, /Source-only bundle requested; skipping node_modules extraction for linux-arm64\./);
+  assert.match(assembleResult.stdout, /source-only bundle: restore dependencies separately before running verification or project tooling/i);
+  assert.equal(await exists(path.join(bundleRoot, 'repo', 'node_modules')), false);
+});
+
 test('omits node_modules tar for projects without npm dependencies and still supports the exact offline workflow', async () => {
   const projectRoot = path.join(tempRoot, 'project-c');
   await copyProject(path.join(fixturesRoot, 'no-deps-project'), projectRoot);
@@ -106,6 +143,24 @@ test('omits node_modules tar for projects without npm dependencies and still sup
   assert.deepEqual(verifyResults, {
     lint: 'passed',
     test: 'passed'
+  });
+});
+
+test('raises a docker-daemon-specific error for cross-target npm dependency capture', async () => {
+  const projectRoot = path.join(tempRoot, 'project-docker-error');
+  await copyProject(path.join(fixturesRoot, 'local-dep-project'), projectRoot);
+
+  const fakeDockerDir = path.join(tempRoot, 'fake-docker-daemon-error');
+  await createDockerDaemonUnavailable(fakeDockerDir);
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await withEnvironment({
+    PATH: `${fakeDockerDir}:${process.env.PATH || ''}`
+  }, async () => {
+    await assert.rejects(
+      () => main(['--project-root', projectRoot, '--output', outputFile, '--target', 'linux-arm64']),
+      /Docker is required to build the requested target on this host, but the Docker daemon is not reachable\.[\s\S]*--source-only/
+    );
   });
 });
 
@@ -293,6 +348,22 @@ async function createFakeDocker(binDir) {
     "}",
     "console.error(`unsupported docker invocation: ${args.join(' ')}`);",
     "process.exit(1);",
+    ''
+  ].join('\n');
+
+  await fs.writeFile(scriptPath, script, 'utf8');
+  await fs.chmod(scriptPath, 0o755);
+}
+
+async function createDockerDaemonUnavailable(binDir) {
+  await fs.mkdir(binDir, { recursive: true });
+  const scriptPath = path.join(binDir, 'docker');
+  const script = [
+    '#!/usr/bin/env node',
+    "const args = process.argv.slice(2);",
+    "if (args[0] === '--version') { console.log('Docker version 0.0.0-fake'); process.exit(0); }",
+    "console.error('docker: Cannot connect to the Docker daemon at unix:///tmp/fake-docker.sock. Is the docker daemon running?');",
+    "process.exit(125);",
     ''
   ].join('\n');
 

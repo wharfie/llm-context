@@ -35,9 +35,19 @@ export async function prepareTargetArtifacts({
   targetArch,
   dockerImage,
   keepTemp = false,
-  projectType
+  projectType,
+  sourceOnly = false
 }) {
   const descriptor = getProjectTypeDescriptor(projectType);
+  if (sourceOnly) {
+    return buildSourceOnlyTargetArtifactResult({
+      projectRoot,
+      targetPlatform,
+      targetArch,
+      descriptor
+    });
+  }
+
   if (descriptor.id === 'npm') {
     return prepareNpmTargetArtifacts({
       projectRoot,
@@ -58,6 +68,25 @@ export async function prepareTargetArtifacts({
     dockerImage,
     keepTemp,
     descriptor
+  });
+}
+
+async function buildSourceOnlyTargetArtifactResult({ projectRoot, targetPlatform, targetArch, descriptor }) {
+  const targetKey = `${targetPlatform}-${targetArch}`;
+  const installRequired = descriptor.id === 'npm'
+    ? await npmProjectNeedsInstall(projectRoot)
+    : true;
+
+  return buildTargetArtifactResult({
+    descriptor,
+    targetKey,
+    installRequired,
+    copiedArchive: false,
+    targetArchive: null,
+    copiedTargetLock: false,
+    targetLockPath: null,
+    keepTemp: false,
+    tempRoot: null
   });
 }
 
@@ -104,7 +133,11 @@ async function prepareNpmTargetArtifacts({ projectRoot, bundleRoot, targetPlatfo
           'bash', '-lc',
           cmd
         ];
-        runCommand('docker', args, { stdio: 'inherit' });
+        try {
+          runCommand('docker', args, { stdio: 'inherit' });
+        } catch (error) {
+          throw wrapDockerExecutionError(error);
+        }
       } else {
         console.error(`Running ${installArgs.join(' ')} locally.`);
         runCommand(installArgs[0], installArgs.slice(1), { cwd: workspaceRoot, stdio: 'inherit' });
@@ -316,7 +349,25 @@ function runPythonUvSyncInDocker({ workspaceRoot, dockerImage, dockerPlatform, f
     'bash', '-lc',
     command
   ];
-  runCommand('docker', args, { stdio: 'inherit' });
+  try {
+    runCommand('docker', args, { stdio: 'inherit' });
+  } catch (error) {
+    throw wrapDockerExecutionError(error);
+  }
+}
+
+function wrapDockerExecutionError(error) {
+  const message = error && error.message ? error.message : String(error);
+  if (!/Cannot connect to the Docker daemon|error during connect|Is the docker daemon running\?/i.test(message)) {
+    return error;
+  }
+
+  return new Error([
+    'Docker is required to build the requested target on this host, but the Docker daemon is not reachable.',
+    'Start Docker, choose a target that matches the current host, or pass --source-only to skip target dependency bundling.',
+    '',
+    message
+  ].join('\n'));
 }
 
 export function parseRequiresPythonSpecFromToml(text) {
@@ -579,41 +630,132 @@ export async function verifyNodeModulesArchive({ archiveFile, sourceNodeModulesD
       throw new Error('Verification failed: extracted archive is missing node_modules/.');
     }
 
-    const sourceBinDir = path.join(sourceNodeModulesDir, '.bin');
-    const extractedBinDir = path.join(extractedNodeModules, '.bin');
-    if (await exists(sourceBinDir)) {
-      if (!(await exists(extractedBinDir))) {
-        throw new Error('Verification failed: extracted archive is missing node_modules/.bin.');
-      }
-      const sourceBins = (await fs.readdir(sourceBinDir)).sort();
-      const extractedBins = (await fs.readdir(extractedBinDir)).sort();
-      if (JSON.stringify(sourceBins) !== JSON.stringify(extractedBins)) {
-        throw new Error('Verification failed: node_modules/.bin entries changed during archive creation.');
-      }
-      for (const binName of sourceBins) {
-        const sourceEntry = path.join(sourceBinDir, binName);
-        const extractedEntry = path.join(extractedBinDir, binName);
-        const [sourceStat, extractedStat] = await Promise.all([fs.lstat(sourceEntry), fs.lstat(extractedEntry)]);
-        if (sourceStat.isSymbolicLink() !== extractedStat.isSymbolicLink()) {
-          throw new Error(`Verification failed: .bin entry type changed for ${binName}.`);
-        }
-        if (sourceStat.isSymbolicLink()) {
-          const [sourceTarget, extractedTarget] = await Promise.all([fs.readlink(sourceEntry), fs.readlink(extractedEntry)]);
-          if (sourceTarget !== extractedTarget) {
-            throw new Error(`Verification failed: symlink target changed for node_modules/.bin/${binName}.`);
-          }
-        }
-      }
-    }
+    await verifyNodeModulesBinDirectory({ sourceNodeModulesDir, extractedNodeModules });
 
-    const sampleFiles = await collectNodeModulesVerificationSamples(sourceNodeModulesDir);
-    for (const relPath of sampleFiles) {
-      if (!(await exists(path.join(extractedNodeModules, relPath)))) {
-        throw new Error(`Verification failed: extracted archive is missing node_modules/${relPath}.`);
-      }
-    }
+    const [sourceEntries, extractedEntries] = await Promise.all([
+      collectTreeVerificationMetadata(sourceNodeModulesDir),
+      collectTreeVerificationMetadata(extractedNodeModules)
+    ]);
+
+    compareTreeVerificationMetadata({
+      sourceEntries,
+      extractedEntries,
+      rootLabel: 'node_modules'
+    });
   } finally {
     await rmrf(extractRoot);
+  }
+}
+
+async function verifyNodeModulesBinDirectory({ sourceNodeModulesDir, extractedNodeModules }) {
+  const sourceBinDir = path.join(sourceNodeModulesDir, '.bin');
+  const extractedBinDir = path.join(extractedNodeModules, '.bin');
+  if (!(await exists(sourceBinDir))) return;
+
+  if (!(await exists(extractedBinDir))) {
+    throw new Error('Verification failed: extracted archive is missing node_modules/.bin.');
+  }
+
+  const sourceBins = (await fs.readdir(sourceBinDir)).sort();
+  const extractedBins = (await fs.readdir(extractedBinDir)).sort();
+  if (JSON.stringify(sourceBins) !== JSON.stringify(extractedBins)) {
+    throw new Error('Verification failed: node_modules/.bin entries changed during archive creation.');
+  }
+
+  for (const binName of sourceBins) {
+    const sourceEntry = path.join(sourceBinDir, binName);
+    const extractedEntry = path.join(extractedBinDir, binName);
+    const [sourceStat, extractedStat] = await Promise.all([fs.lstat(sourceEntry), fs.lstat(extractedEntry)]);
+    if (sourceStat.isSymbolicLink() !== extractedStat.isSymbolicLink()) {
+      throw new Error(`Verification failed: .bin entry type changed for ${binName}.`);
+    }
+    if (sourceStat.isSymbolicLink()) {
+      const [sourceTarget, extractedTarget] = await Promise.all([fs.readlink(sourceEntry), fs.readlink(extractedEntry)]);
+      if (sourceTarget !== extractedTarget) {
+        throw new Error(`Verification failed: symlink target changed for node_modules/.bin/${binName}.`);
+      }
+    }
+  }
+}
+
+async function collectTreeVerificationMetadata(rootDir) {
+  const entries = new Map();
+
+  async function walk(currentDir) {
+    const children = await fs.readdir(currentDir, { withFileTypes: true });
+    children.sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const child of children) {
+      const absPath = path.join(currentDir, child.name);
+      const relPath = normalizeRelative(path.relative(rootDir, absPath));
+      const stat = await fs.lstat(absPath);
+
+      if (stat.isDirectory()) {
+        entries.set(relPath, {
+          type: 'directory'
+        });
+        await walk(absPath);
+        continue;
+      }
+
+      if (stat.isSymbolicLink()) {
+        entries.set(relPath, {
+          type: 'symlink',
+          target: await fs.readlink(absPath)
+        });
+        continue;
+      }
+
+      if (stat.isFile()) {
+        entries.set(relPath, {
+          type: 'file',
+          size: stat.size,
+          mode: stat.mode & 0o777
+        });
+      }
+    }
+  }
+
+  await walk(rootDir);
+  return entries;
+}
+
+function compareTreeVerificationMetadata({ sourceEntries, extractedEntries, rootLabel }) {
+  const sourcePaths = [...sourceEntries.keys()].sort();
+  const extractedPaths = [...extractedEntries.keys()].sort();
+
+  for (const relPath of sourcePaths) {
+    if (!extractedEntries.has(relPath)) {
+      throw new Error(`Verification failed: extracted archive is missing ${rootLabel}/${relPath}.`);
+    }
+  }
+
+  for (const relPath of extractedPaths) {
+    if (!sourceEntries.has(relPath)) {
+      throw new Error(`Verification failed: extracted archive contains unexpected ${rootLabel}/${relPath}.`);
+    }
+  }
+
+  for (const relPath of sourcePaths) {
+    const sourceEntry = sourceEntries.get(relPath);
+    const extractedEntry = extractedEntries.get(relPath);
+
+    if (sourceEntry.type !== extractedEntry.type) {
+      throw new Error(`Verification failed: entry type changed for ${rootLabel}/${relPath}.`);
+    }
+
+    if (sourceEntry.type === 'symlink' && sourceEntry.target !== extractedEntry.target) {
+      throw new Error(`Verification failed: symlink target changed for ${rootLabel}/${relPath}.`);
+    }
+
+    if (sourceEntry.type === 'file') {
+      if (sourceEntry.size !== extractedEntry.size) {
+        throw new Error(`Verification failed: file size changed for ${rootLabel}/${relPath}.`);
+      }
+      if (sourceEntry.mode !== extractedEntry.mode) {
+        throw new Error(`Verification failed: file mode changed for ${rootLabel}/${relPath}.`);
+      }
+    }
   }
 }
 
@@ -669,35 +811,6 @@ async function detectVirtualEnvPythonPath(venvDir) {
     }
   }
   return null;
-}
-
-async function collectNodeModulesVerificationSamples(nodeModulesDir) {
-  const preferred = [];
-  const packageJsons = [];
-  const jsFiles = [];
-
-  async function walk(currentDir, depth = 0) {
-    if (depth > 4) return;
-    const entries = await fs.readdir(currentDir, { withFileTypes: true });
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      const abs = path.join(currentDir, entry.name);
-      const rel = normalizeRelative(path.relative(nodeModulesDir, abs));
-      if (rel.startsWith('.bin/')) continue;
-      if (entry.isDirectory()) {
-        await walk(abs, depth + 1);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      if (entry.name === 'package.json' && packageJsons.length < 100) packageJsons.push(rel);
-      if (entry.name.endsWith('.js') && jsFiles.length < 100) jsFiles.push(rel);
-    }
-  }
-
-  await walk(nodeModulesDir, 0);
-  preferred.push(...packageJsons.slice(0, 100));
-  preferred.push(...jsFiles.slice(0, 100));
-  return preferred;
 }
 
 async function collectVirtualEnvVerificationSamples(venvDir) {

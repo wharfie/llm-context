@@ -1,33 +1,23 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-export async function buildBundleScripts({ bundleDir, targetKey, projectType, preassembledRepoIncluded, preassembledRepoEmbedsDependencies }) {
+export async function buildBundleScripts({ bundleDir, targetKey, projectType, preassembledRepoIncluded, preassembledRepoEmbedsDependencies, sourceOnly = false }) {
   const preassembledSection = preassembledRepoIncluded
     ? [
         'PREASSEMBLED_REPO_TAR="$ROOT_DIR/repo.tar.gz"',
         `PREASSEMBLED_REPO_EMBEDS_DEPENDENCIES="${preassembledRepoEmbedsDependencies ? '1' : '0'}"`,
-        'USED_PREASSEMBLED_REPO="0"',
         '',
         'extract_preassembled_repo() {',
-        '  local temp_root',
-        '  temp_root="$(mktemp -d "${TMPDIR:-/tmp}/llm-context-assemble-XXXXXX")"',
-        '  trap "rm -rf \"$temp_root\"" RETURN',
-        '  tar -xzf "$PREASSEMBLED_REPO_TAR" -C "$temp_root"',
-        '  if [[ ! -d "$temp_root/repo" ]]; then',
+        '  tar -xzf "$PREASSEMBLED_REPO_TAR" -C "$STAGE_ROOT"',
+        '  if [[ ! -d "$STAGE_DIR" ]]; then',
         '    echo "Preassembled archive is missing top-level repo/: $PREASSEMBLED_REPO_TAR" >&2',
         '    return 1',
         '  fi',
-        '  mkdir -p "$OUT_DIR"',
-        '  cp -a "$temp_root/repo/." "$OUT_DIR/"',
         '}',
         '',
         'if [[ -f "$PREASSEMBLED_REPO_TAR" ]]; then',
-        '  echo "Extracting preassembled repository into $OUT_DIR"',
-        '  if [[ "$OUT_DIR" == "$ROOT_DIR/repo" ]]; then',
-        '    tar -xzf "$PREASSEMBLED_REPO_TAR" -C "$ROOT_DIR"',
-        '  else',
-        '    extract_preassembled_repo',
-        '  fi',
+        '  echo "Extracting preassembled repository into staged output for $OUT_DIR"',
+        '  extract_preassembled_repo',
         '  USED_PREASSEMBLED_REPO="1"',
         'fi',
         ''
@@ -48,16 +38,36 @@ export async function buildBundleScripts({ bundleDir, targetKey, projectType, pr
     'SOURCE_TAR="$ROOT_DIR/LLM_CONTEXT_source.tar.gz"',
     `DEPENDENCY_TAR="$TARGET_DIR/${projectType.dependencyArchiveFileName}"`,
     `TARGET_LOCK="$TARGET_DIR/${projectType.lockfileName}"`,
+    `SOURCE_ONLY="${sourceOnly ? '1' : '0'}"`,
+    'STAGE_ROOT="$(mktemp -d "$OUT_DIR_PARENT/.llm-context-assemble-XXXXXX")"',
+    'STAGE_DIR="$STAGE_ROOT/repo"',
+    'BACKUP_ROOT=""',
+    'BACKUP_PATH=""',
     'USED_PREASSEMBLED_REPO="0"',
     'PREASSEMBLED_REPO_EMBEDS_DEPENDENCIES="0"',
     '',
+    'cleanup() {',
+    '  local status=$?',
+    '  if [[ $status -ne 0 && -n "$BACKUP_PATH" && -e "$BACKUP_PATH" && ! -e "$OUT_DIR" ]]; then',
+    '    mv "$BACKUP_PATH" "$OUT_DIR"',
+    '    echo "Assembly failed; restored previous output at $OUT_DIR" >&2',
+    '  fi',
+    '  if [[ -n "$BACKUP_ROOT" && -e "$BACKUP_ROOT" ]]; then',
+    '    rm -rf "$BACKUP_ROOT"',
+    '  fi',
+    '  if [[ -n "$STAGE_ROOT" && -e "$STAGE_ROOT" ]]; then',
+    '    rm -rf "$STAGE_ROOT"',
+    '  fi',
+    '}',
+    'trap cleanup EXIT',
+    '',
     preassembledSection,
     'if [[ "$USED_PREASSEMBLED_REPO" != "1" ]]; then',
-    '  echo "Extracting source snapshot into $OUT_DIR"',
-    '  mkdir -p "$OUT_DIR"',
-    '  tar -xzf "$SOURCE_TAR" -C "$OUT_DIR"',
+    '  echo "Extracting source snapshot into staged output for $OUT_DIR"',
+    '  mkdir -p "$STAGE_DIR"',
+    '  tar -xzf "$SOURCE_TAR" -C "$STAGE_DIR"',
     '',
-    `  SOURCE_LOCK="$OUT_DIR/${projectType.lockfileName}"`,
+    `  SOURCE_LOCK="$STAGE_DIR/${projectType.lockfileName}"`,
     '  if [[ -f "$TARGET_LOCK" ]]; then',
     '    if [[ ! -f "$SOURCE_LOCK" ]]; then',
     '      cp "$TARGET_LOCK" "$SOURCE_LOCK"',
@@ -65,9 +75,9 @@ export async function buildBundleScripts({ bundleDir, targetKey, projectType, pr
     '    elif cmp -s "$SOURCE_LOCK" "$TARGET_LOCK"; then',
     `      echo "Source and target ${projectType.lockfileName} already match"`,
     '    else',
-    '      mkdir -p "$OUT_DIR/.llm_context_target"',
-    `      cp "$TARGET_LOCK" "$OUT_DIR/.llm_context_target/${projectType.lockfileName}"`,
-    `      echo "Saved differing target ${projectType.lockfileName} to $OUT_DIR/.llm_context_target/${projectType.lockfileName}"`,
+    '      mkdir -p "$STAGE_DIR/.llm_context_target"',
+    `      cp "$TARGET_LOCK" "$STAGE_DIR/.llm_context_target/${projectType.lockfileName}"`,
+    `      echo "Saved differing target ${projectType.lockfileName} to $STAGE_DIR/.llm_context_target/${projectType.lockfileName}"`,
     '    fi',
     '  fi',
     'fi',
@@ -76,19 +86,38 @@ export async function buildBundleScripts({ bundleDir, targetKey, projectType, pr
     '  if [[ "$USED_PREASSEMBLED_REPO" == "1" && "$PREASSEMBLED_REPO_EMBEDS_DEPENDENCIES" == "1" ]]; then',
     `    echo "Preassembled repository already contains ${projectType.dependencyDirectory}; skipping dependency extraction."`,
     '  else',
-    '    echo "Extracting target dependencies into $OUT_DIR"',
-    '    tar -xzf "$DEPENDENCY_TAR" -C "$OUT_DIR"',
+    '    echo "Extracting target dependencies into staged output for $OUT_DIR"',
+    '    tar -xzf "$DEPENDENCY_TAR" -C "$STAGE_DIR"',
     '  fi',
     'else',
-    `  echo "No target dependency archive present for $TARGET_KEY; skipping ${projectType.dependencyDirectory} extraction."`,
+    '  if [[ "$SOURCE_ONLY" == "1" ]]; then',
+    `    echo "Source-only bundle requested; skipping ${projectType.dependencyDirectory} extraction for $TARGET_KEY."`,
+    '  else',
+    `    echo "No target dependency archive present for $TARGET_KEY; skipping ${projectType.dependencyDirectory} extraction."`,
+    '  fi',
+    'fi',
+    '',
+    'if [[ -e "$OUT_DIR" ]]; then',
+    '  BACKUP_ROOT="$(mktemp -d "$OUT_DIR_PARENT/.llm-context-backup-XXXXXX")"',
+    '  BACKUP_PATH="$BACKUP_ROOT/original"',
+    '  mv "$OUT_DIR" "$BACKUP_PATH"',
+    'fi',
+    'mv "$STAGE_DIR" "$OUT_DIR"',
+    'if [[ -n "$STAGE_ROOT" && -e "$STAGE_ROOT" ]]; then',
+    '  rm -rf "$STAGE_ROOT"',
+    '  STAGE_ROOT=""',
+    'fi',
+    'if [[ -n "$BACKUP_ROOT" && -e "$BACKUP_ROOT" ]]; then',
+    '  rm -rf "$BACKUP_ROOT"',
+    '  BACKUP_ROOT=""',
+    '  BACKUP_PATH=""',
     'fi',
     '',
     'echo',
     "printf 'Repository assembled at: %s\\n' \"$OUT_DIR\"",
     "printf 'Next commands:\\n'",
     "printf '  cd %q\\n' \"$OUT_DIR\"",
-    "printf '  %q %q\\n' \"$ROOT_DIR/verify.offline.sh\" \"$OUT_DIR\"",
-    ...buildExtraAssembleCommandLines(projectType),
+    ...buildExtraAssembleCommandLines(projectType, sourceOnly),
     ''
   ].filter(Boolean).join('\n');
 
@@ -108,14 +137,25 @@ export async function buildBundleScripts({ bundleDir, targetKey, projectType, pr
   };
 }
 
-function buildExtraAssembleCommandLines(projectType) {
+function buildExtraAssembleCommandLines(projectType, sourceOnly) {
+  if (sourceOnly) {
+    return [
+      "printf '  # source-only bundle: restore dependencies separately before running verification or project tooling\\n'"
+    ];
+  }
+
+  const baseLines = [
+    "printf '  %q %q\\n' \"$ROOT_DIR/verify.offline.sh\" \"$OUT_DIR\""
+  ];
+
   if (projectType.id === 'npm') {
     return [
+      ...baseLines,
       "printf '  npm run lint\\n'",
       "printf '  npm run test\\n'"
     ];
   }
-  return [];
+  return baseLines;
 }
 
 function buildNpmVerifyScript() {

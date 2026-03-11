@@ -49,6 +49,7 @@ llm-context --project-type python-uv
 llm-context --target linux-x64
 llm-context --platform linux --arch arm64
 llm-context --keep-temp
+llm-context --source-only
 llm-context --docker-image node:22-bookworm-slim
 llm-context --embed-dependencies-in-repo
 llm-context --no-preassembled-repo
@@ -59,18 +60,30 @@ llm-context --no-preassembled-repo
 - Defaults to target `linux/x64`
 - Auto-detects npm vs python-uv from the project root
 - Uses Docker when the host cannot natively build the requested target
+- `--source-only` skips target dependency capture entirely, so the bundle only contains source artifacts and does not require Docker for cross-target source-only runs
 - Cross-target python-uv builds auto-select an Astral uv image from `requires-python` in `uv.lock` or `pyproject.toml`, then pull it when needed
 - Keeps the existing npm flow for `node_modules/` and `package-lock.json`
 - For python-uv projects, creates a target `.venv/` bundle with `uv sync --all-groups --no-install-project`
 - Rewrites bundled Python console-script shebangs to `#!/usr/bin/env python3` so extracted `.venv` environments stay runnable when `.venv/bin` is on `PATH`
 - Generates executable `assemble.offline.sh` and `verify.offline.sh` helper scripts inside the bundle
-- Resolves relative verification targets correctly, so the documented `./verify.offline.sh repo` flow works as written
+- Resolves relative verification targets correctly, so the documented `./verify.offline.sh repo` flow works as written when bundled dependencies are present or restored separately
 
 ### Docker notes
 
 - npm projects default to `node:22-bookworm-slim` for cross-target installs
 - python-uv projects work natively on matching hosts
 - cross-target python-uv builds auto-select and pull `ghcr.io/astral-sh/uv:python<major.minor>-...` from `requires-python`; `--docker-image` still overrides the automatic choice
+- If Docker is installed but its daemon is unavailable, the CLI now raises an explicit error that points to `--source-only` as the no-dependencies fallback
+
+## Source-only bundles
+
+Use `--source-only` when you want the flattened context, exact source snapshot, and optional preassembled `repo/` tree without any bundled `node_modules/`, `.venv/`, or target lockfile capture.
+
+```bash
+llm-context --source-only
+```
+
+That mode still writes `README.md`, `MANIFEST.json`, `assemble.offline.sh`, and `verify.offline.sh`, but the generated bundle docs and assembler output stop suggesting immediate verification because dependencies were intentionally omitted.
 
 ## Reconstruction
 

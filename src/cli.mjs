@@ -48,14 +48,17 @@ export async function main(argv = process.argv.slice(2)) {
       targetArch,
       dockerImage: options.dockerImage,
       keepTemp: Boolean(options.keepTemp),
-      projectType: projectType.id
+      projectType: projectType.id,
+      sourceOnly: Boolean(options.sourceOnly)
     });
-    if (depsMeta.dependencyArchiveIncluded) {
+    if (options.sourceOnly) {
+      console.error(`Source-only bundle requested; skipped target dependency and lockfile capture for ${targetKey}.`);
+    } else if (depsMeta.dependencyArchiveIncluded) {
       console.error(`Wrote ${depsMeta.dependencyArchivePath}`);
     } else {
       console.error(`Skipped targets/${targetKey}/${projectType.dependencyArchiveFileName} because the target install did not need ${projectType.dependencyDirectory}/.`);
     }
-    if (depsMeta.targetLockIncluded) {
+    if (!options.sourceOnly && depsMeta.targetLockIncluded) {
       console.error(`Wrote ${depsMeta.targetLockPath}`);
     }
 
@@ -93,14 +96,16 @@ export async function main(argv = process.argv.slice(2)) {
       dependencyArchiveIncluded: depsMeta.dependencyArchiveIncluded,
       targetLockIncluded: depsMeta.targetLockIncluded,
       preassembledRepoIncluded,
-      preassembledRepoEmbedsDependencies
+      preassembledRepoEmbedsDependencies,
+      sourceOnly: Boolean(options.sourceOnly)
     });
     const scriptPaths = await buildBundleScripts({
       bundleDir,
       targetKey,
       projectType,
       preassembledRepoIncluded,
-      preassembledRepoEmbedsDependencies
+      preassembledRepoEmbedsDependencies,
+      sourceOnly: Boolean(options.sourceOnly)
     });
 
     stripExtendedAttributes(bundleDir);
@@ -131,6 +136,7 @@ export async function main(argv = process.argv.slice(2)) {
         nodeModulesIncluded: projectType.id === 'npm' ? depsMeta.dependencyArchiveIncluded : false
       },
       bundleOptions: {
+        sourceOnly: Boolean(options.sourceOnly),
         preassembledRepoIncluded,
         preassembledRepoEmbedsDependencies,
         preassembledRepoEmbedsNodeModules: projectType.id === 'npm' ? preassembledRepoEmbedsDependencies : false
@@ -268,6 +274,10 @@ function parseArgs(argv) {
       options.keepTemp = true;
       continue;
     }
+    if (arg === '--source-only') {
+      options.sourceOnly = true;
+      continue;
+    }
     if (arg === '--no-preassembled-repo') {
       options.noPreassembledRepo = true;
       continue;
@@ -286,5 +296,5 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`llm-context\n\nUsage:\n  llm-context [options]\n\nOptions:\n  --output, -o <file>              Output tar.gz path (default: ./LLM_CONTEXT.tar.gz)\n  --project-root <dir>             Project root (default: cwd)\n  --project-type <type>            auto|npm|python-uv (default: auto)\n  --target <platform-arch>         Target tuple (default: linux-x64)\n  --platform <platform>            Target platform\n  --arch <arch>                    Target arch\n  --docker-image <image>           Docker image for cross-target installs (default: node:22-bookworm-slim for npm; python-uv auto-selects a uv image from requires-python)\n  --keep-temp                      Keep temporary bundle/workspace directories\n  --no-preassembled-repo           Omit repo.tar.gz entirely\n  --embed-dependencies-in-repo     Also embed node_modules/.venv inside repo.tar.gz\n  --embed-node-modules-in-repo     Backward-compatible alias for --embed-dependencies-in-repo\n  --help, -h                       Show help\n`);
+  console.log(`llm-context\n\nUsage:\n  llm-context [options]\n\nOptions:\n  --output, -o <file>              Output tar.gz path (default: ./LLM_CONTEXT.tar.gz)\n  --project-root <dir>             Project root (default: cwd)\n  --project-type <type>            auto|npm|python-uv (default: auto)\n  --target <platform-arch>         Target tuple (default: linux-x64)\n  --platform <platform>            Target platform\n  --arch <arch>                    Target arch\n  --docker-image <image>           Docker image for cross-target installs (default: node:22-bookworm-slim for npm; python-uv auto-selects a uv image from requires-python)\n  --keep-temp                      Keep temporary bundle/workspace directories\n  --source-only                    Skip target dependency capture and bundle only source artifacts\n  --no-preassembled-repo           Omit repo.tar.gz entirely\n  --embed-dependencies-in-repo     Also embed node_modules/.venv inside repo.tar.gz\n  --embed-node-modules-in-repo     Backward-compatible alias for --embed-dependencies-in-repo\n  --help, -h                       Show help\n`);
 }

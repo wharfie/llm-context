@@ -81,14 +81,19 @@ export function quoteShell(value) {
 }
 
 export function runCommand(command, args, options = {}) {
+  const passthroughOutput = options.stdio === 'inherit';
   const result = spawnSync(command, args, {
     cwd: options.cwd,
     env: { ...process.env, ...(options.env ?? {}) },
     encoding: 'utf8',
-    stdio: options.stdio ?? 'pipe',
+    stdio: passthroughOutput ? 'pipe' : (options.stdio ?? 'pipe'),
     input: options.input,
     maxBuffer: options.maxBuffer ?? 1024 * 1024 * 256
   });
+  if (passthroughOutput && result.status === 0) {
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+  }
   if (result.error) throw result.error;
   if (result.status !== 0) {
     const pretty = [command, ...args].join(' ');
