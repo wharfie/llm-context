@@ -24,8 +24,7 @@ export const DEFAULT_EXCLUDES = [
   'LLM_CONTEXT.tar.gz',
   'LLM_CONTEXT_source.tar.gz',
   'LLM_CONTEXT_package-lock.json',
-  'LLM_CONTEXT_node_modules.tar.gz',
-  'targets'
+  'LLM_CONTEXT_node_modules.tar.gz'
 ];
 
 export async function discoverProjectFiles(projectRoot, { extraExcludes = [] } = {}) {

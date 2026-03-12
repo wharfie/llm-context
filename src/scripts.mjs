@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-export async function buildBundleScripts({ bundleDir, targetKey, projectType, preassembledRepoIncluded, preassembledRepoEmbedsDependencies, sourceOnly = false }) {
+export async function buildBundleScripts({ bundleDir, targetKey, projectType, preassembledRepoIncluded, preassembledRepoEmbedsDependencies }) {
   const preassembledSection = preassembledRepoIncluded
     ? [
         'PREASSEMBLED_REPO_TAR="$ROOT_DIR/repo.tar.gz"',
@@ -38,7 +38,6 @@ export async function buildBundleScripts({ bundleDir, targetKey, projectType, pr
     'SOURCE_TAR="$ROOT_DIR/LLM_CONTEXT_source.tar.gz"',
     `DEPENDENCY_TAR="$TARGET_DIR/${projectType.dependencyArchiveFileName}"`,
     `TARGET_LOCK="$TARGET_DIR/${projectType.lockfileName}"`,
-    `SOURCE_ONLY="${sourceOnly ? '1' : '0'}"`,
     'STAGE_ROOT="$(mktemp -d "$OUT_DIR_PARENT/.llm-context-assemble-XXXXXX")"',
     'STAGE_DIR="$STAGE_ROOT/repo"',
     'BACKUP_ROOT=""',
@@ -90,11 +89,7 @@ export async function buildBundleScripts({ bundleDir, targetKey, projectType, pr
     '    tar -xzf "$DEPENDENCY_TAR" -C "$STAGE_DIR"',
     '  fi',
     'else',
-    '  if [[ "$SOURCE_ONLY" == "1" ]]; then',
-    `    echo "Source-only bundle requested; skipping ${projectType.dependencyDirectory} extraction for $TARGET_KEY."`,
-    '  else',
-    `    echo "No target dependency archive present for $TARGET_KEY; skipping ${projectType.dependencyDirectory} extraction."`,
-    '  fi',
+    `  echo "No target dependency archive present for $TARGET_KEY; skipping ${projectType.dependencyDirectory} extraction."`,
     'fi',
     '',
     'if [[ -e "$OUT_DIR" ]]; then',
@@ -117,7 +112,7 @@ export async function buildBundleScripts({ bundleDir, targetKey, projectType, pr
     "printf 'Repository assembled at: %s\\n' \"$OUT_DIR\"",
     "printf 'Next commands:\\n'",
     "printf '  cd %q\\n' \"$OUT_DIR\"",
-    ...buildExtraAssembleCommandLines(projectType, sourceOnly),
+    ...buildExtraAssembleCommandLines(projectType),
     ''
   ].filter(Boolean).join('\n');
 
@@ -137,13 +132,7 @@ export async function buildBundleScripts({ bundleDir, targetKey, projectType, pr
   };
 }
 
-function buildExtraAssembleCommandLines(projectType, sourceOnly) {
-  if (sourceOnly) {
-    return [
-      "printf '  # source-only bundle: restore dependencies separately before running verification or project tooling\\n'"
-    ];
-  }
-
+function buildExtraAssembleCommandLines(projectType) {
   const baseLines = [
     "printf '  %q %q\\n' \"$ROOT_DIR/verify.offline.sh\" \"$OUT_DIR\""
   ];

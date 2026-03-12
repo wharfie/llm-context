@@ -69,41 +69,58 @@ test('includes target package-lock.json when source lockfile is missing and appl
   assert.equal(await exists(path.join(bundleRoot, 'repo', 'package-lock.json')), true);
 });
 
-test('builds a source-only npm bundle without invoking Docker for cross-target builds', async () => {
+test('builds a source-focused npm bundle and still captures cross-target node_modules via Docker', async () => {
   const projectRoot = path.join(tempRoot, 'project-source-only');
   await copyProject(path.join(fixturesRoot, 'local-dep-project'), projectRoot);
 
   const fakeDockerDir = path.join(tempRoot, 'fake-docker-source-only');
-  await createDockerDaemonUnavailable(fakeDockerDir);
+  const fakeDockerLog = path.join(fakeDockerDir, 'docker.log');
+  await createFakeDocker(fakeDockerDir);
 
   const outputFile = path.join(projectRoot, 'out.tar.gz');
   await withEnvironment({
-    PATH: `${fakeDockerDir}:${process.env.PATH || ''}`
+    PATH: `${fakeDockerDir}:${process.env.PATH || ''}`,
+    FAKE_DOCKER_LOG: fakeDockerLog
   }, async () => {
     await main(['--project-root', projectRoot, '--output', outputFile, '--target', 'linux-arm64', '--source-only']);
   });
 
-  const { bundleRoot, assembleScript } = await extractBundle(outputFile, 'inspect-source-only');
-  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-arm64', 'node_modules.tar.gz')), false);
+  const { bundleRoot, assembleScript, verifyScript } = await extractBundle(outputFile, 'inspect-source-only');
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-arm64', 'node_modules.tar.gz')), true);
   assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-arm64', 'package-lock.json')), false);
 
   const manifest = await readJson(path.join(bundleRoot, 'MANIFEST.json'));
   assert.equal(manifest.project.type, 'npm');
   assert.equal(manifest.install.required, true);
-  assert.equal(manifest.install.dependencyArchiveIncluded, false);
+  assert.equal(manifest.install.dependencyArchiveIncluded, true);
   assert.equal(manifest.install.lockfileIncluded, false);
   assert.equal(manifest.bundleOptions.sourceOnly, true);
-  assert.equal(manifest.artifacts.targetDependencies, null);
+  assert.equal(manifest.artifacts.targetDependencies.kind, 'node_modules');
   assert.equal(manifest.artifacts.targetLock, null);
 
   const bundleReadme = await fs.readFile(path.join(bundleRoot, 'README.md'), 'utf8');
+  const contextText = await fs.readFile(path.join(bundleRoot, 'LLM_CONTEXT'), 'utf8');
   assert.match(bundleReadme, /--source-only/);
-  assert.doesNotMatch(bundleReadme, /\.\/verify\.offline\.sh repo/);
+  assert.match(bundleReadme, /\.\/verify\.offline\.sh repo/);
+  assert.match(contextText, /--source-only/);
+  assert.doesNotMatch(contextText, /DEPENDENCY CONTEXT/);
 
-  const assembleResult = runCommand(assembleScript, [], { cwd: bundleRoot });
-  assert.match(assembleResult.stdout, /Source-only bundle requested; skipping node_modules extraction for linux-arm64\./);
-  assert.match(assembleResult.stdout, /source-only bundle: restore dependencies separately before running verification or project tooling/i);
-  assert.equal(await exists(path.join(bundleRoot, 'repo', 'node_modules')), false);
+  const dockerLogLines = (await fs.readFile(fakeDockerLog, 'utf8'))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  assert.ok(dockerLogLines.includes('run node:22-bookworm-slim npm-install'));
+  assert.ok(dockerLogLines.includes('run node:22-bookworm-slim tar-create'));
+
+  runCommand(assembleScript, [], { cwd: bundleRoot });
+  assert.equal(await exists(path.join(bundleRoot, 'repo', 'node_modules', '.bin', 'local-hello')), true);
+
+  runCommand(verifyScript, ['repo'], { cwd: bundleRoot });
+  const verifyResults = await readJson(path.join(bundleRoot, 'repo', '.llm_context_verify', 'results.json'));
+  assert.deepEqual(verifyResults, {
+    lint: 'skipped',
+    test: 'passed'
+  });
 });
 
 test('builds a curated npm context that omits raw lockfiles and summarizes direct dependency metadata', async () => {
@@ -113,11 +130,11 @@ test('builds a curated npm context that omits raw lockfiles and summarizes direc
   const packageJsonPath = path.join(projectRoot, 'package.json');
   const packageJson = await readJson(packageJsonPath);
   packageJson.dependencies = {
-    'external-types-pkg': '^1.0.0'
+    'external-types-pkg': 'file:./packages/external-types-pkg'
   };
   await fs.writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
 
-  const dependencyDir = path.join(projectRoot, 'node_modules', 'external-types-pkg');
+  const dependencyDir = path.join(projectRoot, 'packages', 'external-types-pkg');
   await fs.mkdir(dependencyDir, { recursive: true });
   await fs.writeFile(path.join(dependencyDir, 'package.json'), `${JSON.stringify({
     name: 'external-types-pkg',
@@ -129,7 +146,7 @@ test('builds a curated npm context that omits raw lockfiles and summarizes direc
   await fs.writeFile(path.join(dependencyDir, 'README.md'), '# external-types-pkg\n\nProvides typed greetings.\n');
 
   const outputFile = path.join(projectRoot, 'out.tar.gz');
-  await main(['--project-root', projectRoot, '--output', outputFile, '--source-only']);
+  await main(['--project-root', projectRoot, '--output', outputFile]);
 
   const { bundleRoot } = await extractBundle(outputFile, 'inspect-curated-context');
   const contextText = await fs.readFile(path.join(bundleRoot, 'LLM_CONTEXT'), 'utf8');
@@ -137,8 +154,8 @@ test('builds a curated npm context that omits raw lockfiles and summarizes direc
   assert.doesNotMatch(contextText, /FILE: package-lock\.json/);
   assert.match(contextText, /CONTEXT STRATEGY/);
   assert.match(contextText, /DEPENDENCY CONTEXT/);
-  assert.match(contextText, /\[dependencies\] external-types-pkg -> \^1\.0\.0/);
-  assert.match(contextText, /FILE: node_modules\/external-types-pkg\/index\.d\.ts/);
+  assert.match(contextText, /\[dependencies\] external-types-pkg -> file:\.\/packages\/external-types-pkg/);
+  assert.match(contextText, /FILE: packages\/external-types-pkg\/index\.d\.ts/);
   assert.match(contextText, /Provides typed greetings\./);
 });
 
@@ -162,6 +179,46 @@ test('uses the repo folder name in the default bundle filename and excludes prev
   const sourceRestore = path.join(tempRoot, 'source-restore-default-output-name');
   await extractTarGz({ archiveFile: path.join(bundleRoot, 'LLM_CONTEXT_source.tar.gz'), cwd: sourceRestore });
   assert.equal(await exists(path.join(sourceRestore, 'LLM_CONTEXT-project-default-output-name.tar.gz')), false);
+});
+
+test('preserves a top-level targets directory from the project source snapshot and assembled repo', async () => {
+  const projectRoot = path.join(tempRoot, 'project-targets-dir');
+  await copyProject(path.join(fixturesRoot, 'no-deps-project'), projectRoot);
+
+  const targetsFile = path.join(projectRoot, 'targets', 'custom', 'config.json');
+  await fs.mkdir(path.dirname(targetsFile), { recursive: true });
+  await fs.writeFile(targetsFile, '{\n  "enabled": true\n}\n');
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await main(['--project-root', projectRoot, '--output', outputFile]);
+
+  const { bundleRoot } = await extractBundle(outputFile, 'inspect-targets-dir');
+  const sourceRestore = path.join(tempRoot, 'source-restore-targets-dir');
+  await extractTarGz({ archiveFile: path.join(bundleRoot, 'LLM_CONTEXT_source.tar.gz'), cwd: sourceRestore });
+  assert.equal(await exists(path.join(sourceRestore, 'targets', 'custom', 'config.json')), true);
+
+  runCommand(path.join(bundleRoot, 'assemble.offline.sh'), [], { cwd: bundleRoot });
+  assert.equal(await exists(path.join(bundleRoot, 'repo', 'targets', 'custom', 'config.json')), true);
+});
+
+test('rejects invalid and incomplete CLI option values before bundle assembly starts', async () => {
+  const projectRoot = path.join(tempRoot, 'project-arg-validation');
+  await copyProject(path.join(fixturesRoot, 'no-deps-project'), projectRoot);
+
+  await assert.rejects(
+    () => main(['--project-root', projectRoot, '--target', 'linux']),
+    /Invalid target: linux/
+  );
+
+  await assert.rejects(
+    () => main(['--project-root', projectRoot, '--output']),
+    /--output requires a value\./
+  );
+
+  await assert.rejects(
+    () => main(['--project-root']),
+    /--project-root requires a value\./
+  );
 });
 
 test('omits node_modules tar for projects without npm dependencies and still supports the exact offline workflow', async () => {
@@ -217,12 +274,12 @@ test('raises a docker-daemon-specific error for cross-target npm dependency capt
   }, async () => {
     await assert.rejects(
       () => main(['--project-root', projectRoot, '--output', outputFile, '--target', 'linux-arm64']),
-      /Docker is required to build the requested target on this host, but the Docker daemon is not reachable\.[\s\S]*--source-only/
+      /Docker is required to build the requested target on this host, but the Docker daemon is not reachable\.[\s\S]*Start Docker or choose a target that matches the current host\./
     );
   });
 });
 
-test('builds a python-uv bundle with a relocatable venv archive and working offline verification', async () => {
+test('builds a python-uv bundle with a relocatable venv archive and working offline black/flake8/pytest tooling', async () => {
   const projectRoot = path.join(tempRoot, 'project-d');
   await copyProject(path.join(fixturesRoot, 'python-uv-project'), projectRoot);
 
@@ -249,23 +306,48 @@ test('builds a python-uv bundle with a relocatable venv archive and working offl
   await extractTarGz({ archiveFile: path.join(bundleRoot, 'LLM_CONTEXT_source.tar.gz'), cwd: sourceRestore });
   await extractTarGz({ archiveFile: path.join(bundleRoot, 'targets', 'linux-x64', 'venv.tar.gz'), cwd: sourceRestore });
 
-  const entryPointPath = path.join(sourceRestore, '.venv', 'bin', 'local-uv-hello');
+  const venvBin = path.join(sourceRestore, '.venv', 'bin');
+  const entryPointPath = path.join(venvBin, 'local-uv-hello');
   const entryPointText = await fs.readFile(entryPointPath, 'utf8');
   assert.equal(entryPointText.split('\n', 1)[0], '#!/usr/bin/env python3');
+  assert.equal(await exists(path.join(venvBin, 'black')), true);
+  assert.equal(await exists(path.join(venvBin, 'flake8')), true);
+  assert.equal(await exists(path.join(venvBin, 'pytest')), true);
+
+  const toolEnv = {
+    PATH: `${venvBin}:${process.env.PATH}`,
+    PYTHONPATH: [sourceRestore, path.join(sourceRestore, 'src'), process.env.PYTHONPATH].filter(Boolean).join(':')
+  };
 
   const helloResult = runCommand(entryPointPath, [], {
     cwd: sourceRestore,
-    env: {
-      PATH: `${path.join(sourceRestore, '.venv', 'bin')}:${process.env.PATH}`
-    }
+    env: toolEnv
   });
   assert.match(helloResult.stdout, /hello from wheel/);
+
+  const blackResult = runCommand(path.join(venvBin, 'black'), ['--version'], {
+    cwd: sourceRestore,
+    env: toolEnv
+  });
+  assert.match(blackResult.stdout, /black, 0\.1\.0/);
+
+  const flake8Result = runCommand(path.join(venvBin, 'flake8'), ['--version'], {
+    cwd: sourceRestore,
+    env: toolEnv
+  });
+  assert.match(flake8Result.stdout, /0\.1\.0/);
+
+  const pytestResult = runCommand(path.join(venvBin, 'pytest'), [], {
+    cwd: sourceRestore,
+    env: toolEnv
+  });
+  assert.match(`${pytestResult.stdout}${pytestResult.stderr}`, /OK/);
 
   runCommand(assembleScript, [], { cwd: bundleRoot });
   runCommand(verifyScript, ['repo'], { cwd: bundleRoot });
   const verifyResults = await readJson(path.join(bundleRoot, 'repo', '.llm_context_verify', 'results.json'));
   assert.deepEqual(verifyResults, {
-    lint: 'skipped',
+    lint: 'passed',
     test: 'passed'
   });
 });
@@ -291,7 +373,7 @@ test('captures target uv.lock when the source project does not include one', asy
   assert.equal(await exists(path.join(bundleRoot, 'repo', 'uv.lock')), true);
 });
 
-test('auto-selects and pulls a python-uv Docker image from uv.lock for cross-target builds', async () => {
+test('auto-selects and pulls a python-uv Docker image from uv.lock for cross-target source-only builds', async () => {
   const projectRoot = path.join(tempRoot, 'project-f');
   await copyProject(path.join(fixturesRoot, 'python-uv-project'), projectRoot);
 
@@ -305,7 +387,7 @@ test('auto-selects and pulls a python-uv Docker image from uv.lock for cross-tar
     FAKE_DOCKER_LOG: fakeDockerLog,
     FAKE_DOCKER_ALLOWED_PULLS: 'ghcr.io/astral-sh/uv:python3.13-bookworm'
   }, async () => {
-    await main(['--project-root', projectRoot, '--output', outputFile, '--target', 'linux-arm64']);
+    await main(['--project-root', projectRoot, '--output', outputFile, '--target', 'linux-arm64', '--source-only']);
   });
 
   const dockerLogLines = (await fs.readFile(fakeDockerLog, 'utf8'))
@@ -325,6 +407,10 @@ test('auto-selects and pulls a python-uv Docker image from uv.lock for cross-tar
 
   const { bundleRoot } = await extractBundle(outputFile, 'inspect-f');
   assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-arm64', 'venv.tar.gz')), true);
+
+  const manifest = await readJson(path.join(bundleRoot, 'MANIFEST.json'));
+  assert.equal(manifest.bundleOptions.sourceOnly, true);
+  assert.equal(manifest.install.dependencyArchiveIncluded, true);
 });
 
 async function withEnvironment(overrides, fn) {
@@ -363,6 +449,13 @@ async function createFakeDocker(binDir) {
     "function workspaceRoot(argv) { const index = argv.indexOf('-v'); if (index === -1) return null; return String(argv[index + 1] || '').split(':')[0]; }",
     "function dockerImage(argv) { const bashIndex = argv.indexOf('bash'); return bashIndex > 0 ? argv[bashIndex - 1] : null; }",
     "function pythonMinorVersion(image) { const match = String(image || '').match(/python(\\d+\\.\\d+)/); return match ? match[1] : '3.12'; }",
+    "function createFakeNodeModules(root) {",
+    "  const nodeModulesDir = path.join(root, \"node_modules\");",
+    "  const binDir = path.join(nodeModulesDir, \".bin\");",
+    "  fs.mkdirSync(binDir, { recursive: true });",
+    "  fs.symlinkSync(\"../packages/local-pkg\", path.join(nodeModulesDir, \"local-pkg\"), \"dir\");",
+    "  fs.symlinkSync(\"../local-pkg/bin/local-hello.js\", path.join(binDir, \"local-hello\"));",
+    "}",
     "function createFakeVenv(root, image) {",
     "  const pythonMinor = pythonMinorVersion(image);",
     "  const venvDir = path.join(root, '.venv');",
@@ -393,6 +486,7 @@ async function createFakeDocker(binDir) {
     "  const bashIndex = args.indexOf('bash');",
     "  const command = bashIndex === -1 ? '' : String(args[bashIndex + 2] || '');",
     "  if (!workspace || !image) { console.error('missing workspace or image'); process.exit(1); }",
+    "  if (/\\bnpm\\b/.test(command)) { createFakeNodeModules(workspace); log(`run ${image} npm-install`); process.exit(0); }",
     "  if (command.includes('uv sync')) { createFakeVenv(workspace, image); log(`run ${image} uv-sync`); process.exit(0); }",
     "  if (command.includes('tar -czf')) {",
     "    const match = command.match(/tar -czf ['\\\"]?([^'\\\" ]+)['\\\"]? -C \\/work ['\\\"]?([^'\\\" ]+)['\\\"]?/);",

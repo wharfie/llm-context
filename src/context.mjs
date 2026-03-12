@@ -20,7 +20,7 @@ const CONTEXT_OMITTED_NPM_FILE_NAMES = new Set([
 const README_NAME_CANDIDATES = ['readme.md', 'readme.mdx', 'readme.txt', 'readme'];
 const SEP = '='.repeat(80);
 
-export async function buildContextFile({ projectRoot, outputFile, projectType = 'npm', dependencyContextSection = '' }) {
+export async function buildContextFile({ projectRoot, outputFile, projectType = 'npm', dependencyContextSection = '', sourceOnly = false }) {
   const files = await discoverContextFiles(projectRoot, { projectType });
   const handle = await fs.open(outputFile, 'w');
   try {
@@ -30,7 +30,11 @@ export async function buildContextFile({ projectRoot, outputFile, projectType = 
       await handle.writeFile('----------------\n');
       await handle.writeFile('- This flattened view is optimized for an LLM prompt window.\n');
       await handle.writeFile('- Exact source and runnable dependency state stay in the other bundle artifacts, not in this text file.\n');
-      await handle.writeFile('- Raw npm lockfiles and raw node_modules contents are intentionally omitted here; direct dependencies are summarized separately below.\n\n');
+      if (sourceOnly) {
+        await handle.writeFile('- This run used --source-only, so raw npm lockfiles, raw node_modules contents, and dependency metadata are intentionally omitted here to keep the flattened view source-focused.\n\n');
+      } else {
+        await handle.writeFile('- Raw npm lockfiles and raw node_modules contents are intentionally omitted here; direct dependencies are summarized separately below.\n\n');
+      }
     }
 
     await handle.writeFile('FILE TREE\n');
@@ -55,7 +59,7 @@ export async function buildContextFile({ projectRoot, outputFile, projectType = 
       await writeFileSection(handle, relPath, ensureTrailingNewline(buffer.toString('utf8')));
     }
 
-    if (projectType === 'npm' && dependencyContextSection) {
+    if (projectType === 'npm' && !sourceOnly && dependencyContextSection) {
       await handle.writeFile(`\n${dependencyContextSection}`);
     }
   } finally {

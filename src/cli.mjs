@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { buildContextFile } from './context.mjs';
-import { prepareTargetArtifacts } from './deps.mjs';
+import { parseTarget, prepareTargetArtifacts } from './deps.mjs';
 import { ensureDir, exists, hashFile, stripExtendedAttributes, writeJson, rmrf } from './fs-utils.mjs';
 import { detectProjectType } from './project-type.mjs';
 import { buildBundleReadme } from './readme.mjs';
@@ -20,9 +20,7 @@ export async function main(argv = process.argv.slice(2)) {
   const projectRoot = path.resolve(options.projectRoot || process.cwd());
   const projectType = await detectProjectType(projectRoot, options.projectType || 'auto');
   const outputFile = path.resolve(projectRoot, options.output || defaultOutputFileName(projectRoot));
-  const targetPlatform = options.platform || 'linux';
-  const targetArch = options.arch || 'x64';
-  const targetKey = `${targetPlatform}-${targetArch}`;
+  const { platform: targetPlatform, arch: targetArch, key: targetKey } = resolveTargetOptions(options);
 
   console.error(`Project root: ${projectRoot}`);
   console.error(`Project type: ${projectType.humanName}`);
@@ -50,13 +48,14 @@ export async function main(argv = process.argv.slice(2)) {
       sourceOnly: Boolean(options.sourceOnly)
     });
     if (options.sourceOnly) {
-      console.error(`Source-only bundle requested; skipped target dependency and lockfile capture for ${targetKey}.`);
-    } else if (depsMeta.dependencyArchiveIncluded) {
+      console.error('Source-only context requested; target runtime artifacts are still captured separately for offline validation.');
+    }
+    if (depsMeta.dependencyArchiveIncluded) {
       console.error(`Wrote ${depsMeta.dependencyArchivePath}`);
     } else {
       console.error(`Skipped targets/${targetKey}/${projectType.dependencyArchiveFileName} because the target install did not need ${projectType.dependencyDirectory}/.`);
     }
-    if (!options.sourceOnly && depsMeta.targetLockIncluded) {
+    if (depsMeta.targetLockIncluded) {
       console.error(`Wrote ${depsMeta.targetLockPath}`);
     }
 
@@ -64,7 +63,8 @@ export async function main(argv = process.argv.slice(2)) {
       projectRoot,
       outputFile: contextPath,
       projectType: projectType.id,
-      dependencyContextSection: depsMeta.contextDependencySection
+      dependencyContextSection: depsMeta.contextDependencySection,
+      sourceOnly: Boolean(options.sourceOnly)
     });
     console.error(`Wrote ${contextPath}`);
 
@@ -248,33 +248,47 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === '--output' || arg === '-o') {
-      options.output = argv[++index];
+      const { value, nextIndex } = readRequiredOptionValue(argv, index, arg);
+      options.output = value;
+      index = nextIndex;
       continue;
     }
     if (arg === '--project-root') {
-      options.projectRoot = argv[++index];
+      const { value, nextIndex } = readRequiredOptionValue(argv, index, arg);
+      options.projectRoot = value;
+      index = nextIndex;
       continue;
     }
     if (arg === '--project-type') {
-      options.projectType = argv[++index];
+      const { value, nextIndex } = readRequiredOptionValue(argv, index, arg);
+      options.projectType = value;
+      index = nextIndex;
       continue;
     }
     if (arg === '--platform') {
-      options.platform = argv[++index];
+      const { value, nextIndex } = readRequiredOptionValue(argv, index, arg);
+      options.platform = value;
+      index = nextIndex;
       continue;
     }
     if (arg === '--arch') {
-      options.arch = argv[++index];
+      const { value, nextIndex } = readRequiredOptionValue(argv, index, arg);
+      options.arch = value;
+      index = nextIndex;
       continue;
     }
     if (arg === '--target') {
-      const [platform, arch] = String(argv[++index]).split('-', 2);
-      options.platform = platform;
-      options.arch = arch;
+      const { value, nextIndex } = readRequiredOptionValue(argv, index, arg);
+      const target = parseTarget(value);
+      options.platform = target.platform;
+      options.arch = target.arch;
+      index = nextIndex;
       continue;
     }
     if (arg === '--docker-image') {
-      options.dockerImage = argv[++index];
+      const { value, nextIndex } = readRequiredOptionValue(argv, index, arg);
+      options.dockerImage = value;
+      index = nextIndex;
       continue;
     }
     if (arg === '--keep-temp') {
@@ -302,8 +316,23 @@ function parseArgs(argv) {
   return options;
 }
 
+function readRequiredOptionValue(argv, index, flagName) {
+  const nextIndex = index + 1;
+  const value = argv[nextIndex];
+  if (value == null || value.startsWith('-')) {
+    throw new Error(`${flagName} requires a value.`);
+  }
+  return { value, nextIndex };
+}
+
+function resolveTargetOptions(options) {
+  const platform = options.platform || 'linux';
+  const arch = options.arch || 'x64';
+  return parseTarget(`${platform}-${arch}`);
+}
+
 function printHelp() {
-  console.log(`llm-context\n\nUsage:\n  llm-context [options]\n\nOptions:\n  --output, -o <file>              Output tar.gz path (default: ./LLM_CONTEXT-<folder-name>.tar.gz)\n  --project-root <dir>             Project root (default: cwd)\n  --project-type <type>            auto|npm|python-uv (default: auto)\n  --target <platform-arch>         Target tuple (default: linux-x64)\n  --platform <platform>            Target platform\n  --arch <arch>                    Target arch\n  --docker-image <image>           Docker image for cross-target installs (default: node:22-bookworm-slim for npm; python-uv auto-selects a uv image from requires-python)\n  --keep-temp                      Keep temporary bundle/workspace directories\n  --source-only                    Skip target dependency capture and bundle only source artifacts\n  --no-preassembled-repo           Omit repo.tar.gz entirely\n  --embed-dependencies-in-repo     Also embed node_modules/.venv inside repo.tar.gz\n  --embed-node-modules-in-repo     Backward-compatible alias for --embed-dependencies-in-repo\n  --help, -h                       Show help\n`);
+  console.log(`llm-context\n\nUsage:\n  llm-context [options]\n\nOptions:\n  --output, -o <file>              Output tar.gz path (default: ./LLM_CONTEXT-<folder-name>.tar.gz)\n  --project-root <dir>             Project root (default: cwd)\n  --project-type <type>            auto|npm|python-uv (default: auto)\n  --target <platform-arch>         Target tuple (default: linux-x64)\n  --platform <platform>            Target platform\n  --arch <arch>                    Target arch\n  --docker-image <image>           Docker image for cross-target installs (default: node:22-bookworm-slim for npm; python-uv auto-selects a uv image from requires-python)\n  --keep-temp                      Keep temporary bundle/workspace directories\n  --source-only                    Keep the flattened LLM_CONTEXT focused on source files while still bundling target dependencies\n  --no-preassembled-repo           Omit repo.tar.gz entirely\n  --embed-dependencies-in-repo     Also embed node_modules/.venv inside repo.tar.gz\n  --embed-node-modules-in-repo     Backward-compatible alias for --embed-dependencies-in-repo\n  --help, -h                       Show help\n`);
 }
 
 function defaultOutputFileName(projectRoot) {

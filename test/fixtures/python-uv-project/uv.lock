@@ -3,11 +3,35 @@ revision = 3
 requires-python = ">=3.13"
 
 [[package]]
+name = "black"
+version = "0.1.0"
+source = { path = "vendor/black-0.1.0-py3-none-any.whl" }
+wheels = [
+    { filename = "black-0.1.0-py3-none-any.whl", hash = "sha256:0787a0a142e698182dd4698db773a83a939b4ea3802fa0bb21084d3f2251f44d" },
+]
+
+[[package]]
+name = "flake8"
+version = "0.1.0"
+source = { path = "vendor/flake8-0.1.0-py3-none-any.whl" }
+wheels = [
+    { filename = "flake8-0.1.0-py3-none-any.whl", hash = "sha256:a9caeab913d6f6b61823720e4beebf82f0f3eb4f2cef4acee0a2837f2c60b8b0" },
+]
+
+[[package]]
 name = "local-uv-pkg"
 version = "0.1.0"
 source = { path = "vendor/local_uv_pkg-0.1.0-py3-none-any.whl" }
 wheels = [
     { filename = "local_uv_pkg-0.1.0-py3-none-any.whl", hash = "sha256:7828cc5ebec7abad474f4fefe4c5bf24c473b4beb988c261751907d271e61fa0" },
+]
+
+[[package]]
+name = "pytest"
+version = "0.1.0"
+source = { path = "vendor/pytest-0.1.0-py3-none-any.whl" }
+wheels = [
+    { filename = "pytest-0.1.0-py3-none-any.whl", hash = "sha256:8d2f513f1bcb67313a0352a9d5e4a5705a1b21a997f3bd67a01bf1efc4eead7a" },
 ]
 
 [[package]]
@@ -18,5 +42,19 @@ dependencies = [
     { name = "local-uv-pkg" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "black" },
+    { name = "flake8" },
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [{ name = "local-uv-pkg", path = "vendor/local_uv_pkg-0.1.0-py3-none-any.whl" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "black", path = "vendor/black-0.1.0-py3-none-any.whl" },
+    { name = "flake8", path = "vendor/flake8-0.1.0-py3-none-any.whl" },
+    { name = "pytest", path = "vendor/pytest-0.1.0-py3-none-any.whl" },
+]

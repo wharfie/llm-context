@@ -36,18 +36,9 @@ export async function prepareTargetArtifacts({
   targetArch,
   dockerImage,
   keepTemp = false,
-  projectType,
-  sourceOnly = false
+  projectType
 }) {
   const descriptor = getProjectTypeDescriptor(projectType);
-  if (sourceOnly) {
-    return buildSourceOnlyTargetArtifactResult({
-      projectRoot,
-      targetPlatform,
-      targetArch,
-      descriptor
-    });
-  }
 
   if (descriptor.id === 'npm') {
     return prepareNpmTargetArtifacts({
@@ -69,29 +60,6 @@ export async function prepareTargetArtifacts({
     dockerImage,
     keepTemp,
     descriptor
-  });
-}
-
-async function buildSourceOnlyTargetArtifactResult({ projectRoot, targetPlatform, targetArch, descriptor }) {
-  const targetKey = `${targetPlatform}-${targetArch}`;
-  const installRequired = descriptor.id === 'npm'
-    ? await npmProjectNeedsInstall(projectRoot)
-    : true;
-  const contextDependencySection = descriptor.id === 'npm'
-    ? await buildNpmDependencyContextSection({ projectRoot })
-    : '';
-
-  return buildTargetArtifactResult({
-    descriptor,
-    targetKey,
-    installRequired,
-    copiedArchive: false,
-    targetArchive: null,
-    copiedTargetLock: false,
-    targetLockPath: null,
-    keepTemp: false,
-    tempRoot: null,
-    contextDependencySection
   });
 }
 
@@ -378,7 +346,7 @@ function wrapDockerExecutionError(error) {
 
   return new Error([
     'Docker is required to build the requested target on this host, but the Docker daemon is not reachable.',
-    'Start Docker, choose a target that matches the current host, or pass --source-only to skip target dependency bundling.',
+    'Start Docker or choose a target that matches the current host.',
     '',
     message
   ].join('\n'));

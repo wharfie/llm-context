@@ -61,10 +61,10 @@ llm-context --no-preassembled-repo
 - Defaults to target `linux/x64`
 - Auto-detects npm vs python-uv from the project root
 - Uses Docker when the host cannot natively build the requested target
-- `--source-only` skips target dependency capture entirely, so the bundle only contains source artifacts and does not require Docker for cross-target source-only runs
+- `--source-only` keeps the flattened `LLM_CONTEXT` view focused on source files while still capturing target dependency archives and lockfiles for offline validation on the requested target
 - Cross-target python-uv builds auto-select an Astral uv image from `requires-python` in `uv.lock` or `pyproject.toml`, then pull it when needed
 - Keeps the existing npm flow for `node_modules/` and `package-lock.json`
-- For python-uv projects, creates a target `.venv/` bundle with `uv sync --all-groups --no-install-project`
+- For python-uv projects, creates a target `.venv/` bundle from `pyproject.toml` and `uv.lock` with `uv sync --all-groups --no-install-project`, so dependency groups such as `black`, `flake8`, and `pytest` stay available offline when the project declares them
 - Rewrites bundled Python console-script shebangs to `#!/usr/bin/env python3` so extracted `.venv` environments stay runnable when `.venv/bin` is on `PATH`
 - Generates executable `assemble.offline.sh` and `verify.offline.sh` helper scripts inside the bundle
 - Resolves relative verification targets correctly, so the documented `./verify.offline.sh repo` flow works as written when bundled dependencies are present or restored separately
@@ -74,24 +74,24 @@ llm-context --no-preassembled-repo
 - npm projects default to `node:22-bookworm-slim` for cross-target installs
 - python-uv projects work natively on matching hosts
 - cross-target python-uv builds auto-select and pull `ghcr.io/astral-sh/uv:python<major.minor>-...` from `requires-python`; `--docker-image` still overrides the automatic choice
-- If Docker is installed but its daemon is unavailable, the CLI now raises an explicit error that points to `--source-only` as the no-dependencies fallback
+- If Docker is installed but its daemon is unavailable, the CLI raises an explicit error instead of silently falling back to host-specific artifacts
 
 ## Context vs runtime state
 
 The CLI now treats prompt context and runnable sandbox state as separate artifacts.
 
-- `LLM_CONTEXT` is optimized for an LLM context window. For npm projects it omits raw lockfiles and raw `node_modules/` content, then replaces that noise with a direct dependency summary plus selected README and TypeScript entrypoint snippets when they are available.
+- `LLM_CONTEXT` is optimized for an LLM context window. For npm projects it omits raw lockfiles and raw `node_modules/` content, then replaces that noise with a direct dependency summary plus selected README and TypeScript entrypoint snippets when they are available. When you pass `--source-only`, that direct dependency summary is omitted too so the flattened view stays source-focused.
 - `LLM_CONTEXT_source.tar.gz`, `repo.tar.gz`, and `targets/<platform>-<arch>/...` preserve the exact source tree and target dependency state needed to run lint, tests, and other project tooling offline.
 
 ## Source-only bundles
 
-Use `--source-only` when you want the flattened context, exact source snapshot, and optional preassembled `repo/` tree without any bundled `node_modules/`, `.venv/`, or target lockfile capture.
+Use `--source-only` when you want the flattened `LLM_CONTEXT` artifact to stay focused on repository source files.
 
 ```bash
 llm-context --source-only
 ```
 
-That mode still writes `README.md`, `MANIFEST.json`, `assemble.offline.sh`, and `verify.offline.sh`, but the generated bundle docs and assembler output stop suggesting immediate verification because dependencies were intentionally omitted.
+That flag does **not** disable target dependency capture. The bundle still writes `README.md`, `MANIFEST.json`, `assemble.offline.sh`, `verify.offline.sh`, and any required target `node_modules/`, `.venv/`, or lockfile artifacts so the reconstructed repo can run lint, tests, and Python dev tools offline on the requested target.
 
 ## Reconstruction
 
