@@ -115,8 +115,6 @@ export async function main(argv = process.argv.slice(2)) {
       sourceOnly: Boolean(options.sourceOnly)
     });
 
-    stripExtendedAttributes(bundleDir);
-
     const dependencyArchiveRelativePath = depsMeta.dependencyArchiveIncluded
       ? `targets/${targetKey}/${projectType.dependencyArchiveFileName}`
       : null;
@@ -185,6 +183,7 @@ export async function main(argv = process.argv.slice(2)) {
     };
     await writeJson(path.join(bundleDir, 'MANIFEST.json'), manifest);
 
+    stripExtendedAttributes(bundleDir);
     await createTarGzFromDir({ cwd: tempBundleRoot, outputFile, relativePath: 'LLM_CONTEXT' });
     console.error(`Wrote ${outputFile}`);
   } finally {

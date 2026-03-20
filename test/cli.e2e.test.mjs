@@ -6,7 +6,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { main } from '../src/cli.mjs';
 import { copyProject, exists, rmrf, runCommand } from '../src/fs-utils.mjs';
-import { extractTarGz } from '../src/tar.mjs';
+import { createTarGzFromDir, extractTarGz, resetTarCapabilityCacheForTesting } from '../src/tar.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesRoot = path.join(__dirname, 'fixtures');
@@ -119,6 +119,31 @@ test('builds a source-focused npm bundle and still captures cross-target node_mo
   const verifyResults = await readJson(path.join(bundleRoot, 'repo', '.llm_context_verify', 'results.json'));
   assert.deepEqual(verifyResults, {
     lint: 'skipped',
+    typecheck: 'skipped',
+    test: 'passed'
+  });
+});
+
+test('verify.offline.sh resolves repo paths from inside the assembled npm repo and runs typecheck when present', async () => {
+  const projectRoot = path.join(tempRoot, 'project-verify-from-repo');
+  await copyProject(path.join(fixturesRoot, 'no-deps-project'), projectRoot);
+
+  const packageJsonPath = path.join(projectRoot, 'package.json');
+  const packageJson = await readJson(packageJsonPath);
+  packageJson.scripts.typecheck = 'node -e "console.log(\'typecheck ok\')"';
+  await fs.writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await main(['--project-root', projectRoot, '--output', outputFile]);
+
+  const { bundleRoot, assembleScript, verifyScript } = await extractBundle(outputFile, 'inspect-verify-from-repo');
+  runCommand(assembleScript, [], { cwd: bundleRoot });
+
+  runCommand(verifyScript, ['repo'], { cwd: path.join(bundleRoot, 'repo') });
+  const verifyResults = await readJson(path.join(bundleRoot, 'repo', '.llm_context_verify', 'results.json'));
+  assert.deepEqual(verifyResults, {
+    lint: 'passed',
+    typecheck: 'passed',
     test: 'passed'
   });
 });
@@ -257,6 +282,7 @@ test('omits node_modules tar for projects without npm dependencies and still sup
   const verifyResults = await readJson(path.join(assembledRepo, '.llm_context_verify', 'results.json'));
   assert.deepEqual(verifyResults, {
     lint: 'passed',
+    typecheck: 'skipped',
     test: 'passed'
   });
 });
@@ -277,6 +303,50 @@ test('raises a docker-daemon-specific error for cross-target npm dependency capt
       /Docker is required to build the requested target on this host, but the Docker daemon is not reachable\.[\s\S]*Start Docker or choose a target that matches the current host\./
     );
   });
+});
+
+test('tar creation prefers gtar on darwin and passes metadata-suppression flags through the host tar command', async () => {
+  const realTar = runCommand('bash', ['-lc', 'command -v tar']).stdout.trim();
+  const fakeTarDir = path.join(tempRoot, 'fake-tar');
+  const fakeTarLog = path.join(fakeTarDir, 'tar.log');
+  await createFakeTar(fakeTarDir, realTar);
+
+  const tarInputRoot = path.join(tempRoot, 'tar-probe-input');
+  await fs.mkdir(path.join(tarInputRoot, 'nested'), { recursive: true });
+  await fs.writeFile(path.join(tarInputRoot, 'nested', 'file.txt'), 'hello\n');
+
+  const outputFile = path.join(tempRoot, 'tar-probe.tar.gz');
+  resetTarCapabilityCacheForTesting();
+  await withEnvironment({
+    PATH: `${fakeTarDir}:${process.env.PATH || ''}`,
+    FAKE_TAR_LOG: fakeTarLog,
+    FAKE_TAR_REAL: realTar
+  }, async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+    try {
+      await createTarGzFromDir({ cwd: tarInputRoot, outputFile, relativePath: 'nested' });
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+      resetTarCapabilityCacheForTesting();
+    }
+  });
+
+  assert.equal(await exists(outputFile), true);
+
+  const logLines = (await fs.readFile(fakeTarLog, 'utf8'))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  assert.ok(logLines.some((line) => line.startsWith('probe --no-xattrs ')));
+  assert.ok(logLines.some((line) => line.startsWith('probe --disable-copyfile ')));
+  assert.ok(logLines.some((line) => line.startsWith('probe --no-mac-metadata ')));
+  assert.ok(logLines.some((line) => /create .*--no-xattrs/.test(line)));
+  assert.ok(logLines.some((line) => /create .*--disable-copyfile/.test(line)));
+  assert.ok(logLines.some((line) => /create .*--no-mac-metadata/.test(line)));
+  assert.ok(logLines.some((line) => line.includes('COPYFILE_DISABLE=1')));
+  assert.ok(logLines.some((line) => line.includes('COPY_EXTENDED_ATTRIBUTES_DISABLE=1')));
 });
 
 test('builds a python-uv bundle with a relocatable venv archive and working offline black/flake8/pytest tooling', async () => {
@@ -345,6 +415,7 @@ test('builds a python-uv bundle with a relocatable venv archive and working offl
 
   runCommand(assembleScript, [], { cwd: bundleRoot });
   runCommand(verifyScript, ['repo'], { cwd: bundleRoot });
+  runCommand(verifyScript, ['.'], { cwd: path.join(bundleRoot, 'repo') });
   const verifyResults = await readJson(path.join(bundleRoot, 'repo', '.llm_context_verify', 'results.json'));
   assert.deepEqual(verifyResults, {
     lint: 'passed',
@@ -500,6 +571,34 @@ async function createFakeDocker(binDir) {
     "}",
     "console.error(`unsupported docker invocation: ${args.join(' ')}`);",
     "process.exit(1);",
+    ''
+  ].join('\n');
+
+  await fs.writeFile(scriptPath, script, 'utf8');
+  await fs.chmod(scriptPath, 0o755);
+}
+
+async function createFakeTar(binDir, realTar) {
+  await fs.mkdir(binDir, { recursive: true });
+  const scriptPath = path.join(binDir, 'gtar');
+  const script = [
+    '#!/usr/bin/env node',
+    "const fs = require('node:fs');",
+    "const { execFileSync } = require('node:child_process');",
+    "const path = require('node:path');",
+    "const args = process.argv.slice(2);",
+    "const logFile = process.env.FAKE_TAR_LOG;",
+    "const realTar = process.env.FAKE_TAR_REAL;",
+    "function log(line) { if (logFile) fs.appendFileSync(logFile, `${line}\n`); }",
+    "const passthroughFlags = new Set(['--no-xattrs', '--disable-copyfile', '--no-mac-metadata', '--no-acls', '--no-fflags', '--no-selinux']);",
+    "if (args[0] === '--version') { console.log('gtar (fake) 1.0.0'); process.exit(0); }",
+    "if (args.includes('-czf') && path.basename(String(args[1] || '')) === 'probe.tar.gz') {",
+    "  const flag = args.find((arg) => arg.startsWith('--'));",
+    "  log(`probe ${flag} env:COPYFILE_DISABLE=${process.env.COPYFILE_DISABLE || ''} COPY_EXTENDED_ATTRIBUTES_DISABLE=${process.env.COPY_EXTENDED_ATTRIBUTES_DISABLE || ''}`);",
+    "  process.exit(new Set(['--no-xattrs', '--disable-copyfile', '--no-mac-metadata']).has(flag) ? 0 : 1);",
+    "}",
+    "log(`create ${args.join(' ')} env:COPYFILE_DISABLE=${process.env.COPYFILE_DISABLE || ''} COPY_EXTENDED_ATTRIBUTES_DISABLE=${process.env.COPY_EXTENDED_ATTRIBUTES_DISABLE || ''}`);",
+    "execFileSync(realTar, args.filter((arg) => !passthroughFlags.has(arg)), { stdio: 'ignore' });",
     ''
   ].join('\n');
 

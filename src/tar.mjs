@@ -1,28 +1,62 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ensureDir, maybeRun, quoteShell, runCommand } from './fs-utils.mjs';
+import { ensureDir, maybeRun, quoteShell, runCommand, stripExtendedAttributes } from './fs-utils.mjs';
 
-let cachedTarHelpText = null;
-let cachedCreateArgs = null;
+let cachedTarCommand = null;
+const cachedCreateArgs = new Map();
+const cachedFlagSupport = new Map();
 
 function tarEnv() {
-  return process.platform === 'darwin' ? { COPYFILE_DISABLE: '1' } : {};
+  return process.platform === 'darwin'
+    ? {
+        COPYFILE_DISABLE: '1',
+        COPY_EXTENDED_ATTRIBUTES_DISABLE: '1'
+      }
+    : {};
 }
 
-function tarHelpText() {
-  if (cachedTarHelpText !== null) return cachedTarHelpText;
-  const result = maybeRun('tar', ['--help']);
-  cachedTarHelpText = `${result?.stdout ?? ''}\n${result?.stderr ?? ''}`;
-  return cachedTarHelpText;
+function tarCommand() {
+  if (cachedTarCommand) return cachedTarCommand;
+
+  if (process.platform === 'darwin') {
+    const gtar = maybeRun('gtar', ['--version']);
+    if (gtar && gtar.status === 0) {
+      cachedTarCommand = 'gtar';
+      return cachedTarCommand;
+    }
+  }
+
+  cachedTarCommand = 'tar';
+  return cachedTarCommand;
 }
 
-function tarSupports(flag) {
-  return tarHelpText().includes(flag);
+async function tarSupportsCreateFlag(flag) {
+  const cacheKey = `${process.platform}:${tarCommand()}:${flag}`;
+  if (cachedFlagSupport.has(cacheKey)) return cachedFlagSupport.get(cacheKey);
+
+  const probeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-context-tar-probe-'));
+  try {
+    const archiveFile = path.join(probeRoot, 'probe.tar.gz');
+    const probeFile = path.join(probeRoot, 'probe.txt');
+    await fs.writeFile(probeFile, 'probe\n', 'utf8');
+
+    const result = maybeRun(
+      tarCommand(),
+      ['-czf', archiveFile, flag, '-C', probeRoot, 'probe.txt'],
+      { env: tarEnv() }
+    );
+    const supported = Boolean(result && result.status === 0);
+    cachedFlagSupport.set(cacheKey, supported);
+    return supported;
+  } finally {
+    await fs.rm(probeRoot, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
-function tarCreateExtraArgs() {
-  if (cachedCreateArgs) return cachedCreateArgs;
+async function tarCreateExtraArgs() {
+  const cacheKey = `${process.platform}:${tarCommand()}`;
+  if (cachedCreateArgs.has(cacheKey)) return cachedCreateArgs.get(cacheKey);
 
   const candidates = [
     '--no-xattrs',
@@ -36,8 +70,21 @@ function tarCreateExtraArgs() {
     candidates.unshift('--no-mac-metadata');
   }
 
-  cachedCreateArgs = candidates.filter((flag) => tarSupports(flag));
-  return cachedCreateArgs;
+  const supportedFlags = [];
+  for (const flag of candidates) {
+    if (await tarSupportsCreateFlag(flag)) {
+      supportedFlags.push(flag);
+    }
+  }
+
+  cachedCreateArgs.set(cacheKey, supportedFlags);
+  return supportedFlags;
+}
+
+export function resetTarCapabilityCacheForTesting() {
+  cachedTarCommand = null;
+  cachedCreateArgs.clear();
+  cachedFlagSupport.clear();
 }
 
 export async function createTarGzFromList({ cwd, outputFile, relativePaths }) {
@@ -46,7 +93,8 @@ export async function createTarGzFromList({ cwd, outputFile, relativePaths }) {
   try {
     const content = relativePaths.map((item) => `${item}\n`).join('');
     await fs.writeFile(listFile, content, 'utf8');
-    runCommand('tar', ['-czf', outputFile, ...tarCreateExtraArgs(), '-C', cwd, '-T', listFile], { env: tarEnv() });
+    runCommand(tarCommand(), ['-czf', outputFile, ...(await tarCreateExtraArgs()), '-C', cwd, '-T', listFile], { env: tarEnv() });
+    stripExtendedAttributes(outputFile);
   } finally {
     await fs.rm(listFile, { force: true }).catch(() => {});
   }
@@ -54,12 +102,13 @@ export async function createTarGzFromList({ cwd, outputFile, relativePaths }) {
 
 export async function createTarGzFromDir({ cwd, outputFile, relativePath }) {
   await ensureDir(path.dirname(outputFile));
-  runCommand('tar', ['-czf', outputFile, ...tarCreateExtraArgs(), '-C', cwd, relativePath], { env: tarEnv() });
+  runCommand(tarCommand(), ['-czf', outputFile, ...(await tarCreateExtraArgs()), '-C', cwd, relativePath], { env: tarEnv() });
+  stripExtendedAttributes(outputFile);
 }
 
 export async function extractTarGz({ archiveFile, cwd }) {
   await ensureDir(cwd);
-  runCommand('tar', ['-xzf', archiveFile, '-C', cwd], { env: tarEnv() });
+  runCommand(tarCommand(), ['-xzf', archiveFile, '-C', cwd], { env: tarEnv() });
 }
 
 export async function createTarInDockerOrHost({ workspaceRoot, relativePath, outputFile, useDocker, dockerImage, dockerPlatform }) {
@@ -78,7 +127,8 @@ export async function createTarInDockerOrHost({ workspaceRoot, relativePath, out
     ];
     runCommand('docker', args, { env: tarEnv(), stdio: 'inherit' });
   } else {
-    runCommand('tar', ['-czf', tempArchive, ...tarCreateExtraArgs(), '-C', workspaceRoot, relativePath], { env: tarEnv(), stdio: 'inherit' });
+    runCommand(tarCommand(), ['-czf', tempArchive, ...(await tarCreateExtraArgs()), '-C', workspaceRoot, relativePath], { env: tarEnv(), stdio: 'inherit' });
   }
   await fs.rename(tempArchive, outputFile);
+  stripExtendedAttributes(outputFile);
 }

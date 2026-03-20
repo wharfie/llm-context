@@ -67,6 +67,7 @@ llm-context --no-preassembled-repo
 - For python-uv projects, creates a target `.venv/` bundle from `pyproject.toml` and `uv.lock` with `uv sync --all-groups --no-install-project`, so dependency groups such as `black`, `flake8`, and `pytest` stay available offline when the project declares them
 - Rewrites bundled Python console-script shebangs to `#!/usr/bin/env python3` so extracted `.venv` environments stay runnable when `.venv/bin` is on `PATH`
 - Generates executable `assemble.offline.sh` and `verify.offline.sh` helper scripts inside the bundle
+- `verify.offline.sh` runs `lint`, `typecheck`, and `test` when those npm scripts exist; Python bundles keep their current linter/test autodetection
 - Resolves relative verification targets correctly, so the documented `./verify.offline.sh repo` flow works as written when bundled dependencies are present or restored separately
 
 ### Docker notes
@@ -81,7 +82,7 @@ llm-context --no-preassembled-repo
 The CLI now treats prompt context and runnable sandbox state as separate artifacts.
 
 - `LLM_CONTEXT` is optimized for an LLM context window. For npm projects it omits raw lockfiles and raw `node_modules/` content, then replaces that noise with a direct dependency summary plus selected README and TypeScript entrypoint snippets when they are available. When you pass `--source-only`, that direct dependency summary is omitted too so the flattened view stays source-focused.
-- `LLM_CONTEXT_source.tar.gz`, `repo.tar.gz`, and `targets/<platform>-<arch>/...` preserve the exact source tree and target dependency state needed to run lint, tests, and other project tooling offline.
+- `LLM_CONTEXT_source.tar.gz`, `repo.tar.gz`, and `targets/<platform>-<arch>/...` preserve the exact source tree and target dependency state needed to run lint, typecheck, tests, and other project tooling offline.
 
 ## Source-only bundles
 
@@ -91,7 +92,7 @@ Use `--source-only` when you want the flattened `LLM_CONTEXT` artifact to stay f
 llm-context --source-only
 ```
 
-That flag does **not** disable target dependency capture. The bundle still writes `README.md`, `MANIFEST.json`, `assemble.offline.sh`, `verify.offline.sh`, and any required target `node_modules/`, `.venv/`, or lockfile artifacts so the reconstructed repo can run lint, tests, and Python dev tools offline on the requested target.
+That flag does **not** disable target dependency capture. The bundle still writes `README.md`, `MANIFEST.json`, `assemble.offline.sh`, `verify.offline.sh`, and any required target `node_modules/`, `.venv/`, or lockfile artifacts so the reconstructed repo can run lint, typecheck, tests, and Python dev tools offline on the requested target.
 
 ## Reconstruction
 

@@ -127,7 +127,7 @@ cd LLM_CONTEXT
     sourceOnly
       ? '- For npm bundles created with `--source-only`, the flattened `LLM_CONTEXT` view omits raw lockfiles, raw `node_modules/` contents, and the direct dependency summary.'
       : '- For npm bundles, the flattened `LLM_CONTEXT` view intentionally omits raw lockfiles and raw `node_modules/` contents; it replaces that noise with a smaller direct dependency summary plus selected README and TypeScript entrypoint snippets when available.',
-    '- `verify.offline.sh` only runs npm scripts that actually exist. For Jest-style test scripts, it retries with `--runInBand` after an initial failure, which helps in constrained sandboxes.',
+    '- `verify.offline.sh` only runs standard npm scripts that actually exist. It will run `lint`, `typecheck`, and `test` when present. For Jest-style test scripts, it retries with `--runInBand` after an initial failure, which helps in constrained sandboxes.',
     '- `verify.offline.sh repo` resolves the repo path before it starts writing logs, so relative paths work as written.',
     '- On macOS hosts, bundle creation strips more metadata before archiving, which reduces noisy `LIBARCHIVE.xattr...` warnings during extraction on Linux.'
   ].filter(Boolean).join('\n');
@@ -145,7 +145,7 @@ ${targetNodeModulesLine}
 ${targetLockLine}
 - MANIFEST.json — hashes and bundle metadata
 - assemble.offline.sh — executable reconstruction script
-- verify.offline.sh — executable verifier for lint/test style workflows
+- verify.offline.sh — executable verifier for lint/typecheck/test style workflows
 
 ${fastPathSection}${compatiblePath}
 
@@ -260,7 +260,7 @@ ${targetVenvLine}
 ${targetLockLine}
 - MANIFEST.json — hashes and bundle metadata
 - assemble.offline.sh — executable reconstruction script
-- verify.offline.sh — executable verifier for lint/test style workflows
+- verify.offline.sh — executable verifier for lint/typecheck/test style workflows
 
 ${fastPathSection}${compatiblePath}
 
