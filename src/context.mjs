@@ -20,8 +20,8 @@ const CONTEXT_OMITTED_NPM_FILE_NAMES = new Set([
 const README_NAME_CANDIDATES = ['readme.md', 'readme.mdx', 'readme.txt', 'readme'];
 const SEP = '='.repeat(80);
 
-export async function buildContextFile({ projectRoot, outputFile, projectType = 'npm', dependencyContextSection = '', sourceOnly = false }) {
-  const files = await discoverContextFiles(projectRoot, { projectType });
+export async function buildContextFile({ projectRoot, outputFile, projectType = 'npm', dependencyContextSection = '', sourceOnly = false, slim = false }) {
+  const files = await discoverContextFiles(projectRoot, { projectType, slim });
   const handle = await fs.open(outputFile, 'w');
   try {
     await handle.writeFile('# LLM_CONTEXT\n\n');
@@ -29,10 +29,14 @@ export async function buildContextFile({ projectRoot, outputFile, projectType = 
       await handle.writeFile('CONTEXT STRATEGY\n');
       await handle.writeFile('----------------\n');
       await handle.writeFile('- This flattened view is optimized for an LLM prompt window.\n');
-      await handle.writeFile('- Exact source and runnable dependency state stay in the other bundle artifacts, not in this text file.\n');
-      if (sourceOnly) {
+      if (slim) {
+        await handle.writeFile('- Exact repo source stays in LLM_CONTEXT_source.tar.gz; runtime dependency payloads are intentionally omitted from the slim bundle.\n');
+        await handle.writeFile('- This run used --slim, so dependency metadata and README-style instruction files are intentionally omitted here to maximize signal per byte.\n\n');
+      } else if (sourceOnly) {
+        await handle.writeFile('- Exact source and runnable dependency state stay in the other bundle artifacts, not in this text file.\n');
         await handle.writeFile('- This run used --source-only, so raw npm lockfiles, raw node_modules contents, and dependency metadata are intentionally omitted here to keep the flattened view source-focused.\n\n');
       } else {
+        await handle.writeFile('- Exact source and runnable dependency state stay in the other bundle artifacts, not in this text file.\n');
         await handle.writeFile('- Raw npm lockfiles and raw node_modules contents are intentionally omitted here; direct dependencies are summarized separately below.\n\n');
       }
     }
@@ -169,15 +173,23 @@ export async function buildNpmDependencyContextSection({ projectRoot, installedN
   return section;
 }
 
-async function discoverContextFiles(projectRoot, { projectType }) {
+async function discoverContextFiles(projectRoot, { projectType, slim = false }) {
   const files = await discoverProjectFiles(projectRoot);
-  if (projectType !== 'npm') return files;
-  return files.filter((relPath) => !shouldOmitFromNpmContext(relPath));
+  return files.filter((relPath) => {
+    if (projectType === 'npm' && shouldOmitFromNpmContext(relPath)) return false;
+    if (slim && shouldOmitFromSlimContext(relPath)) return false;
+    return true;
+  });
 }
 
 function shouldOmitFromNpmContext(relPath) {
   const baseName = path.basename(relPath);
   return CONTEXT_OMITTED_NPM_FILE_NAMES.has(baseName);
+}
+
+function shouldOmitFromSlimContext(relPath) {
+  const baseName = path.basename(relPath).toLowerCase();
+  return README_NAME_CANDIDATES.includes(baseName);
 }
 
 function collectDirectDependencies(packageJson) {

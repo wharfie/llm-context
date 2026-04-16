@@ -11,7 +11,7 @@ import { createSourceSnapshot } from './source-snapshot.mjs';
 import { createTarGzFromDir, extractTarGz } from './tar.mjs';
 
 export async function main(argv = process.argv.slice(2)) {
-  const options = parseArgs(argv);
+  const options = applyImpliedOptions(parseArgs(argv));
   if (options.help) {
     printHelp();
     return;
@@ -37,20 +37,26 @@ export async function main(argv = process.argv.slice(2)) {
     await createSourceSnapshot({ projectRoot, outputFile: sourceSnapshotPath });
     console.error(`Wrote ${sourceSnapshotPath}`);
 
-    const depsMeta = await prepareTargetArtifacts({
-      projectRoot,
-      bundleRoot: bundleDir,
-      targetPlatform,
-      targetArch,
-      dockerImage: options.dockerImage,
-      keepTemp: Boolean(options.keepTemp),
-      projectType: projectType.id,
-      sourceOnly: Boolean(options.sourceOnly)
-    });
-    if (options.sourceOnly) {
+    const depsMeta = options.slim
+      ? buildSlimTargetArtifactsMeta()
+      : await prepareTargetArtifacts({
+          projectRoot,
+          bundleRoot: bundleDir,
+          targetPlatform,
+          targetArch,
+          dockerImage: options.dockerImage,
+          keepTemp: Boolean(options.keepTemp),
+          projectType: projectType.id,
+          sourceOnly: Boolean(options.sourceOnly)
+        });
+    if (options.slim) {
+      console.error('Slim bundle requested; omitting target runtime dependencies, repo.tar.gz, and offline helper scripts to keep the archive context-first and upload-friendly.');
+    } else if (options.sourceOnly) {
       console.error('Source-only context requested; target runtime artifacts are still captured separately for offline validation.');
     }
-    if (depsMeta.dependencyArchiveIncluded) {
+    if (options.slim) {
+      console.error(`Skipped targets/${targetKey}/${projectType.dependencyArchiveFileName} because --slim intentionally omits ${projectType.dependencyDirectory}/ from the bundle.`);
+    } else if (depsMeta.dependencyArchiveIncluded) {
       console.error(`Wrote ${depsMeta.dependencyArchivePath}`);
     } else {
       console.error(`Skipped targets/${targetKey}/${projectType.dependencyArchiveFileName} because the target install did not need ${projectType.dependencyDirectory}/.`);
@@ -64,7 +70,8 @@ export async function main(argv = process.argv.slice(2)) {
       outputFile: contextPath,
       projectType: projectType.id,
       dependencyContextSection: depsMeta.contextDependencySection,
-      sourceOnly: Boolean(options.sourceOnly)
+      sourceOnly: Boolean(options.sourceOnly),
+      slim: Boolean(options.slim)
     });
     console.error(`Wrote ${contextPath}`);
 
@@ -104,16 +111,19 @@ export async function main(argv = process.argv.slice(2)) {
       targetLockIncluded: depsMeta.targetLockIncluded,
       preassembledRepoIncluded,
       preassembledRepoEmbedsDependencies,
-      sourceOnly: Boolean(options.sourceOnly)
+      sourceOnly: Boolean(options.sourceOnly),
+      slim: Boolean(options.slim)
     });
-    const scriptPaths = await buildBundleScripts({
-      bundleDir,
-      targetKey,
-      projectType,
-      preassembledRepoIncluded,
-      preassembledRepoEmbedsDependencies,
-      sourceOnly: Boolean(options.sourceOnly)
-    });
+    const scriptPaths = options.slim
+      ? { assembleScriptPath: null, verifyScriptPath: null }
+      : await buildBundleScripts({
+          bundleDir,
+          targetKey,
+          projectType,
+          preassembledRepoIncluded,
+          preassembledRepoEmbedsDependencies,
+          sourceOnly: Boolean(options.sourceOnly)
+        });
 
     const dependencyArchiveRelativePath = depsMeta.dependencyArchiveIncluded
       ? `targets/${targetKey}/${projectType.dependencyArchiveFileName}`
@@ -141,6 +151,7 @@ export async function main(argv = process.argv.slice(2)) {
         nodeModulesIncluded: projectType.id === 'npm' ? depsMeta.dependencyArchiveIncluded : false
       },
       bundleOptions: {
+        slim: Boolean(options.slim),
         sourceOnly: Boolean(options.sourceOnly),
         preassembledRepoIncluded,
         preassembledRepoEmbedsDependencies,
@@ -177,8 +188,12 @@ export async function main(argv = process.argv.slice(2)) {
             }
           : null,
         readme: { path: 'README.md', sha256: await hashFile(readmePath) },
-        assembleScript: { path: 'assemble.offline.sh', sha256: await hashFile(scriptPaths.assembleScriptPath) },
-        verifyScript: { path: 'verify.offline.sh', sha256: await hashFile(scriptPaths.verifyScriptPath) }
+        assembleScript: scriptPaths.assembleScriptPath
+          ? { path: 'assemble.offline.sh', sha256: await hashFile(scriptPaths.assembleScriptPath) }
+          : null,
+        verifyScript: scriptPaths.verifyScriptPath
+          ? { path: 'verify.offline.sh', sha256: await hashFile(scriptPaths.verifyScriptPath) }
+          : null
       }
     };
     await writeJson(path.join(bundleDir, 'MANIFEST.json'), manifest);
@@ -193,6 +208,25 @@ export async function main(argv = process.argv.slice(2)) {
       console.error(`Kept temp bundle dir: ${tempBundleRoot}`);
     }
   }
+}
+
+function buildSlimTargetArtifactsMeta() {
+  return {
+    installRequired: false,
+    dependencyArchiveIncluded: false,
+    dependencyArchivePath: null,
+    targetLockIncluded: false,
+    targetLockPath: null,
+    contextDependencySection: ''
+  };
+}
+
+function applyImpliedOptions(options) {
+  if (options.slim) {
+    options.sourceOnly = true;
+    options.noPreassembledRepo = true;
+  }
+  return options;
 }
 
 async function buildPreassembledRepo({
@@ -294,6 +328,10 @@ function parseArgs(argv) {
       options.keepTemp = true;
       continue;
     }
+    if (arg === '--slim' || arg === '-s') {
+      options.slim = true;
+      continue;
+    }
     if (arg === '--source-only') {
       options.sourceOnly = true;
       continue;
@@ -331,7 +369,7 @@ function resolveTargetOptions(options) {
 }
 
 function printHelp() {
-  console.log(`llm-context\n\nUsage:\n  llm-context [options]\n\nOptions:\n  --output, -o <file>              Output tar.gz path (default: ./LLM_CONTEXT-<folder-name>.tar.gz)\n  --project-root <dir>             Project root (default: cwd)\n  --project-type <type>            auto|npm|python-uv (default: auto)\n  --target <platform-arch>         Target tuple (default: linux-x64)\n  --platform <platform>            Target platform\n  --arch <arch>                    Target arch\n  --docker-image <image>           Docker image for cross-target installs (default: node:22-bookworm-slim for npm; python-uv auto-selects a uv image from requires-python)\n  --keep-temp                      Keep temporary bundle/workspace directories\n  --source-only                    Keep the flattened LLM_CONTEXT focused on source files while still bundling target dependencies\n  --no-preassembled-repo           Omit repo.tar.gz entirely\n  --embed-dependencies-in-repo     Also embed node_modules/.venv inside repo.tar.gz\n  --embed-node-modules-in-repo     Backward-compatible alias for --embed-dependencies-in-repo\n  --help, -h                       Show help\n`);
+  console.log(`llm-context\n\nUsage:\n  llm-context [options]\n\nOptions:\n  --output, -o <file>              Output tar.gz path (default: ./LLM_CONTEXT-<folder-name>.tar.gz)\n  --project-root <dir>             Project root (default: cwd)\n  --project-type <type>            auto|npm|python-uv (default: auto)\n  --target <platform-arch>         Target tuple (default: linux-x64)\n  --platform <platform>            Target platform\n  --arch <arch>                    Target arch\n  --docker-image <image>           Docker image for cross-target installs (default: node:22-bookworm-slim for npm; python-uv auto-selects a uv image from requires-python)\n  --keep-temp                      Keep temporary bundle/workspace directories\n  --slim, -s                       Create a context-first slim bundle; implies --source-only and omits target dependencies, repo.tar.gz, and offline helper scripts\n  --source-only                    Keep the flattened LLM_CONTEXT focused on source files while still bundling target dependencies\n  --no-preassembled-repo           Omit repo.tar.gz entirely\n  --embed-dependencies-in-repo     Also embed node_modules/.venv inside repo.tar.gz\n  --embed-node-modules-in-repo     Backward-compatible alias for --embed-dependencies-in-repo\n  --help, -h                       Show help\n`);
 }
 
 function defaultOutputFileName(projectRoot) {

@@ -2,7 +2,7 @@
 
 Build a single `LLM_CONTEXT-<folder-name>.tar.gz` from the root of an npm project or a Python project managed with uv.
 
-The unified archive contains:
+By default, the unified archive contains:
 
 - `LLM_CONTEXT` — curated flattened text context for an LLM prompt window
 - `LLM_CONTEXT_source.tar.gz` — exact source snapshot for byte-faithful reconstruction
@@ -48,6 +48,7 @@ llm-context --project-type npm
 llm-context --project-type python-uv
 llm-context --target linux-x64
 llm-context --platform linux --arch arm64
+llm-context --slim
 llm-context --keep-temp
 llm-context --source-only
 llm-context --docker-image node:22-bookworm-slim
@@ -61,12 +62,13 @@ llm-context --no-preassembled-repo
 - Defaults to target `linux/x64`
 - Auto-detects npm vs python-uv from the project root
 - Uses Docker when the host cannot natively build the requested target
+- `--slim` creates a context-first bundle by implying `--source-only`, omitting target dependency archives, omitting `repo.tar.gz`, and omitting offline helper scripts so upload size stays as low as possible
 - `--source-only` keeps the flattened `LLM_CONTEXT` view focused on source files while still capturing target dependency archives and lockfiles for offline validation on the requested target
 - Cross-target python-uv builds auto-select an Astral uv image from `requires-python` in `uv.lock` or `pyproject.toml`, then pull it when needed
 - Keeps the existing npm flow for `node_modules/` and `package-lock.json`
 - For python-uv projects, creates a target `.venv/` bundle from `pyproject.toml` and `uv.lock` with `uv sync --all-groups --no-install-project`, so dependency groups such as `black`, `flake8`, and `pytest` stay available offline when the project declares them
 - Rewrites bundled Python console-script shebangs to `#!/usr/bin/env python3` so extracted `.venv` environments stay runnable when `.venv/bin` is on `PATH`
-- Generates executable `assemble.offline.sh` and `verify.offline.sh` helper scripts inside the bundle
+- Default bundles generate executable `assemble.offline.sh` and `verify.offline.sh` helper scripts inside the bundle; `--slim` omits them
 - `verify.offline.sh` runs `lint`, `typecheck`, and `test` when those npm scripts exist; Python bundles keep their current linter/test autodetection
 - Resolves relative verification targets correctly, so the documented `./verify.offline.sh repo` flow works as written when bundled dependencies are present or restored separately
 
@@ -82,6 +84,7 @@ llm-context --no-preassembled-repo
 The CLI now treats prompt context and runnable sandbox state as separate artifacts.
 
 - `LLM_CONTEXT` is optimized for an LLM context window. For npm projects it omits raw lockfiles and raw `node_modules/` content, then replaces that noise with a direct dependency summary plus selected README and TypeScript entrypoint snippets when they are available. When you pass `--source-only`, that direct dependency summary is omitted too so the flattened view stays source-focused.
+- `--slim` goes further than `--source-only`: it keeps `LLM_CONTEXT` and the exact source snapshot, but intentionally drops target runtime artifacts and helper scripts to maximize context per byte.
 - `LLM_CONTEXT_source.tar.gz`, `repo.tar.gz`, and `targets/<platform>-<arch>/...` preserve the exact source tree and target dependency state needed to run lint, typecheck, tests, and other project tooling offline.
 
 ## Source-only bundles
@@ -93,6 +96,25 @@ llm-context --source-only
 ```
 
 That flag does **not** disable target dependency capture. The bundle still writes `README.md`, `MANIFEST.json`, `assemble.offline.sh`, `verify.offline.sh`, and any required target `node_modules/`, `.venv/`, or lockfile artifacts so the reconstructed repo can run lint, typecheck, tests, and Python dev tools offline on the requested target.
+
+## Slim bundles
+
+Use `--slim` when the priority is fitting more source context into an upload budget.
+
+```bash
+llm-context --slim
+```
+
+That mode is intentionally context-first:
+
+- it implies `--source-only`
+- it omits bundled target `node_modules/` or `.venv/`
+- it omits target lockfile captures
+- it omits `repo.tar.gz`
+- it omits `assemble.offline.sh` and `verify.offline.sh`
+- it omits README-style instruction files from the flattened `LLM_CONTEXT` view when possible
+
+Slim bundles still keep `LLM_CONTEXT_source.tar.gz`, so the exact source tree remains available even though offline validation helpers are intentionally excluded.
 
 ## Reconstruction
 

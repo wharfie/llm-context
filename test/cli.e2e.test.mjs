@@ -124,6 +124,63 @@ test('builds a source-focused npm bundle and still captures cross-target node_mo
   });
 });
 
+test('builds a slim npm bundle that skips runtime artifacts and omits README-style instruction files from the flattened context', async () => {
+  const projectRoot = path.join(tempRoot, 'project-slim');
+  await copyProject(path.join(fixturesRoot, 'local-dep-project'), projectRoot);
+  await fs.writeFile(path.join(projectRoot, 'README.md'), '# Project\n\n```bash\nnpm install\nnpm run test\n```\n');
+
+  const fakeDockerDir = path.join(tempRoot, 'fake-docker-slim');
+  await createDockerDaemonUnavailable(fakeDockerDir);
+
+  const outputFile = path.join(projectRoot, 'out.tar.gz');
+  await withEnvironment({
+    PATH: `${fakeDockerDir}:${process.env.PATH || ''}`
+  }, async () => {
+    await main(['--project-root', projectRoot, '--output', outputFile, '--target', 'linux-arm64', '-s']);
+  });
+
+  const { bundleRoot } = await extractBundle(outputFile, 'inspect-slim');
+
+  assert.equal(await exists(path.join(bundleRoot, 'LLM_CONTEXT')), true);
+  assert.equal(await exists(path.join(bundleRoot, 'LLM_CONTEXT_source.tar.gz')), true);
+  assert.equal(await exists(path.join(bundleRoot, 'repo.tar.gz')), false);
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-arm64', 'node_modules.tar.gz')), false);
+  assert.equal(await exists(path.join(bundleRoot, 'targets', 'linux-arm64', 'package-lock.json')), false);
+  assert.equal(await exists(path.join(bundleRoot, 'assemble.offline.sh')), false);
+  assert.equal(await exists(path.join(bundleRoot, 'verify.offline.sh')), false);
+
+  const manifest = await readJson(path.join(bundleRoot, 'MANIFEST.json'));
+  assert.equal(manifest.formatVersion, 6);
+  assert.equal(manifest.project.type, 'npm');
+  assert.equal(manifest.install.required, false);
+  assert.equal(manifest.install.dependencyArchiveIncluded, false);
+  assert.equal(manifest.install.lockfileIncluded, false);
+  assert.equal(manifest.bundleOptions.slim, true);
+  assert.equal(manifest.bundleOptions.sourceOnly, true);
+  assert.equal(manifest.bundleOptions.preassembledRepoIncluded, false);
+  assert.equal(manifest.artifacts.preassembledRepo, null);
+  assert.equal(manifest.artifacts.targetDependencies, null);
+  assert.equal(manifest.artifacts.targetNodeModules, null);
+  assert.equal(manifest.artifacts.targetLock, null);
+  assert.equal(manifest.artifacts.assembleScript, null);
+  assert.equal(manifest.artifacts.verifyScript, null);
+
+  const bundleReadme = await fs.readFile(path.join(bundleRoot, 'README.md'), 'utf8');
+  assert.match(bundleReadme, /--slim/);
+  assert.doesNotMatch(bundleReadme, /npm run test/);
+  assert.doesNotMatch(bundleReadme, /Run these commands exactly from the bundle directory/);
+
+  const contextText = await fs.readFile(path.join(bundleRoot, 'LLM_CONTEXT'), 'utf8');
+  assert.match(contextText, /--slim/);
+  assert.doesNotMatch(contextText, /DEPENDENCY CONTEXT/);
+  assert.doesNotMatch(contextText, /FILE: README\.md/);
+  assert.match(contextText, /FILE: package\.json/);
+
+  const sourceRestore = path.join(tempRoot, 'source-restore-slim');
+  await extractTarGz({ archiveFile: path.join(bundleRoot, 'LLM_CONTEXT_source.tar.gz'), cwd: sourceRestore });
+  assert.equal(await exists(path.join(sourceRestore, 'README.md')), true);
+});
+
 test('verify.offline.sh resolves repo paths from inside the assembled npm repo and runs typecheck when present', async () => {
   const projectRoot = path.join(tempRoot, 'project-verify-from-repo');
   await copyProject(path.join(fixturesRoot, 'no-deps-project'), projectRoot);

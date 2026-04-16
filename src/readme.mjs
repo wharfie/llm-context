@@ -10,31 +10,68 @@ export async function buildBundleReadme({
   targetLockIncluded,
   preassembledRepoIncluded,
   preassembledRepoEmbedsDependencies,
-  sourceOnly = false
+  sourceOnly = false,
+  slim = false
 }) {
-  const readmeText = projectType.id === 'npm'
-    ? buildNpmBundleReadme({
-        archiveFileName,
-        targetKey,
-        dependencyArchiveIncluded,
-        targetLockIncluded,
-        preassembledRepoIncluded,
-        preassembledRepoEmbedsDependencies,
-        sourceOnly
-      })
-    : buildPythonUvBundleReadme({
-        archiveFileName,
-        targetKey,
-        dependencyArchiveIncluded,
-        targetLockIncluded,
-        preassembledRepoIncluded,
-        preassembledRepoEmbedsDependencies,
-        sourceOnly
-      });
+  const readmeText = slim
+    ? buildSlimBundleReadme({ archiveFileName, projectType, targetKey })
+    : projectType.id === 'npm'
+      ? buildNpmBundleReadme({
+          archiveFileName,
+          targetKey,
+          dependencyArchiveIncluded,
+          targetLockIncluded,
+          preassembledRepoIncluded,
+          preassembledRepoEmbedsDependencies,
+          sourceOnly
+        })
+      : buildPythonUvBundleReadme({
+          archiveFileName,
+          targetKey,
+          dependencyArchiveIncluded,
+          targetLockIncluded,
+          preassembledRepoIncluded,
+          preassembledRepoEmbedsDependencies,
+          sourceOnly
+        });
 
   const readmePath = path.join(bundleDir, 'README.md');
   await fs.writeFile(readmePath, readmeText, 'utf8');
   return readmePath;
+}
+
+function buildSlimBundleReadme({ archiveFileName, projectType, targetKey }) {
+  const dependencyLabel = projectType.id === 'npm'
+    ? '`targets/<target>/node_modules.tar.gz`'
+    : '`targets/<target>/venv.tar.gz`';
+  const lockfileLabel = `\`targets/<target>/${projectType.lockfileName}\``;
+
+  return `# LLM_CONTEXT bundle
+
+This archive was generated with \`--slim\`. It keeps the highest-value prompt context and the exact source snapshot, while intentionally omitting runnable target state so the bundle stays much smaller and easier to upload.
+
+## Contents
+
+- LLM_CONTEXT — curated flattened text context for LLM consumption
+- LLM_CONTEXT_source.tar.gz — exact source snapshot of the repo
+- README.md — this summary
+- MANIFEST.json — hashes and bundle metadata
+
+## Slim behavior
+
+- Implies \`--source-only\`
+- Omits ${dependencyLabel} for \`${targetKey}\`
+- Omits ${lockfileLabel}
+- Omits \`repo.tar.gz\`
+- Omits \`assemble.offline.sh\` and \`verify.offline.sh\`
+- Omits README-style instruction files and dependency summaries from the flattened \`LLM_CONTEXT\` view when possible
+
+## Notes
+
+- The exact repo source is still preserved in \`LLM_CONTEXT_source.tar.gz\`.
+- Slim bundles are meant for context transfer, not offline validation.
+- The full workflow bundle remains available without \`--slim\` when you need runnable target dependencies or validation helpers.
+`;
 }
 
 function buildNpmBundleReadme({ archiveFileName, targetKey, dependencyArchiveIncluded, targetLockIncluded, preassembledRepoIncluded, preassembledRepoEmbedsDependencies, sourceOnly }) {
